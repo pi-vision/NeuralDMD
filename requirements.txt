@@ -1,0 +1,13 @@
+astropy
+ehtim==1.2.10
+h5py
+imageio
+matplotlib
+optax
+tqdm
+Cartopy
+xarray
+scikit-image
+equinox
+netCDF4
+ngehtsim
