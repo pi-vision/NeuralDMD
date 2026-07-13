@@ -1,153 +1,156 @@
+"""Loader for NeuralDMD visibility datasets.
+
+Consumes a dataset directory produced by eht2017/data_generation.py (see
+eht2017/README.md for the exact file formats) and serves per-epoch batches of
+time frames: each batch bundles the frame's forward operator, complex
+visibilities, amplitudes, and closure phases, all padded to fixed shapes with
+accompanying masks.
+"""
+
 import os
 import numpy as np
-import jax.numpy as jnp
-from jax import random
-import jax
-"""
-NeuralDMD DataLoader for loading precomputed data from npy files.
-The npy files should contain the following arrays:
-  - As.npy: A matrix for each time frame (shape: (T, max_vis, num_samples)), which translates the image space to visibility space.
-  - targets.npy: Target visibilities for each time frame (shape: (T, max_vis)), which are the true visibilities.
-  - sigmas.npy: Noise standard deviation for each visibility (shape: (T, max_vis)), which is the error budget in the measurements.
-  - masks.npy: Mask for each visibility (shape: (T, max_vis)), which indicates whether the visibility is valid or not as the original A matrices were not of the same size and they have been padded.
-  - num_vis_list.npy: Number of visibilities for each time frame (shape: (T,)), which is used to mask out the padded visibilities.
 
-"""
+
 class DMDDataLoader:
-    def __init__(self, 
-                 data,         # Image cube: shape (num_frames, H, W) [can be numpy or JAX array]
-                 batch_size,   # Number of time frames per batch
-                 epochs,       # Total number of epochs (for precomputing time indices)
-                 data_dir,     # Directory where the npy files ("As.npy", "targets.npy", etc.) are stored
-                 times=None,
-                 fov_x=1.,    # Field-of-view in microarcseconds (x direction)
-                 fov_y=1.,    # Field-of-view in microarcseconds (y direction)
-                 time_fraction=1.,  # Fraction (0 to 1) of time frames to use each epoch
-                 shuffle=True,
-                 seed=42):
-        """
-        Initialize the data loader.
-        
-        Parameters:
-          data: Numpy array of shape (num_frames, H, W) representing the image cube.
-          batch_size: Number of time frames per batch.
-          epochs: Number of epochs (for precomputing time indices).
-          data_dir: Directory containing the pre-generated npy files:
-                    "As.npy", "targets.npy", "sigmas.npy", "masks.npy".
-          times: Array of time values corresponding to each frame.
-          fov_x, fov_y: Field of view along x and y.
-          time_fraction: Fraction of the total time frames to sample in each epoch.
-          shuffle: Whether to shuffle the time indices.
-          seed: Random seed.
-        """
+    def __init__(
+        self,
+        data,  # ground-truth image cube (num_frames, H, W); diagnostics only
+        batch_size,  # number of time frames per batch
+        epochs,  # total number of epochs (time indices are precomputed)
+        data_dir,  # dataset directory with the .npy observation products
+        times=None,  # (num_frames,) times, typically normalized to [0, 1]
+        fov_x=np.pi,  # network coordinate extents (arbitrary units; the
+        fov_y=np.pi,  # physical scale lives in the forward operators)
+        time_fraction=1.0,  # fraction of frames sampled per epoch
+        shuffle=True,
+        seed=42,
+    ):
         self.data_dir = data_dir
-        self.times = times
-        
-        # Convert the image cube to a JAX array.
-        self.data = jnp.array(data)  # shape: (num_frames, H, W)
+        self.times = np.asarray(times) if times is not None else None
+
+        self.data = np.asarray(data)
         self.num_frames, self.height, self.width = self.data.shape
         self.num_samples = self.height * self.width
-        
-        # Save FOV details for converting pixel indices.
-        self.fov_x = fov_x
-        self.fov_y = fov_y
-        self.pixel_size_x = fov_x / self.width
-        self.pixel_size_y = fov_y / self.height
-        
-        self.shuffle = shuffle
-        self.rng_key = random.PRNGKey(seed)
-        
-        # Precompute pixel coordinates (using all pixels).
-        self.indices = jnp.arange(self.num_samples)
-        self.pixel_coords = self._pixel_to_physical(self.indices)
-        
-        # Time parameters.
-        self.time_fraction = time_fraction
-        self.num_time_samples = int(self.time_fraction * self.num_frames)
-        self.batch_size = batch_size  # number of time frames per batch
-        self.epochs = epochs
-        
 
-        # Precompute time indices for each epoch.
+        self.fov_x = float(fov_x)
+        self.fov_y = float(fov_y)
+        self.pixel_size_x = self.fov_x / self.width
+        self.pixel_size_y = self.fov_y / self.height
+
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng(seed)
+
+        # Pixel coordinates for the coordinate network, (P, 2)
+        self.indices = np.arange(self.num_samples, dtype=np.int64)
+        self.pixel_coords = self._pixel_to_physical(self.indices)
+
+        # Observation products (see eht2017/README.md)
+        load = lambda name: np.load(os.path.join(data_dir, name))
+        self.As_full = load("As.npy")  # (T, M, P) complex64
+        self.targets_full = load("targets.npy")  # (T, M) complex64
+        self.sigmas_full = load("sigmas.npy")  # (T, M)
+        self.masks_full = load("masks.npy")  # (T, M)
+        self.num_vis_list = load("num_vis_list.npy")  # (T,)
+
+        self.amp_targets = load("amp_targets.npy")  # (T, M)
+        self.amp_sigmas = load("amp_sigmas.npy")  # (T, M)
+
+        self.cp_targets_full = load("cp_targets.npy")  # (T, K)
+        self.cp_sigmas_full = load("cp_sigmas.npy")  # (T, K)
+        self.cp_masks_full = load("cp_masks.npy")  # (T, K)
+        self.triangles = load("cp_tris.npy")  # (T, K, 3, 2)
+
+        assert self.As_full.shape[2] == self.num_samples, (
+            f"forward operators expect {self.As_full.shape[2]} pixels but the "
+            f"movie grid has {self.num_samples}"
+        )
+
+        # The obs scheduler can produce slightly fewer observed frames than
+        # the movie has (a trailing scan can fall outside the window); the
+        # first T_obs frames correspond one-to-one by construction.
+        T_obs = self.As_full.shape[0]
+        if T_obs < self.num_frames:
+            print(
+                f"[DMDDataLoader] dataset has {T_obs} observed frames; "
+                f"trimming movie from {self.num_frames} frames to match"
+            )
+            self.data = self.data[:T_obs]
+            self.num_frames = T_obs
+            if self.times is not None:
+                self.times = self.times[:T_obs]
+        elif T_obs > self.num_frames:
+            raise ValueError(
+                f"dataset has {T_obs} frames but the movie has only "
+                f"{self.num_frames}"
+            )
+
+        # Time sampling
+        self.time_fraction = float(time_fraction)
+        self.num_time_samples = int(self.time_fraction * self.num_frames)
+        self.batch_size = int(batch_size)
+        self.epochs = int(epochs)
         self._precompute_time_indices()
-        
-        # Load the precomputed npy files (these are assumed to have been generated earlier)
-        self.As_full = jnp.array(np.load(os.path.join(data_dir, "As.npy")))         # shape: (T_full, max_vis, num_samples)
-        print("As shape:", self.As_full.shape)
-        self.targets_full = jnp.array(np.load(os.path.join(data_dir, "targets.npy")))   # shape: (T_full, max_vis)
-        self.sigmas_full = jnp.array(np.load(os.path.join(data_dir, "sigmas.npy")))     # shape: (T_full, max_vis)
-        # max_sigma = jnp.max(self.sigmas_full)
-        # min_sigma = jnp.min(self.sigmas_full)
-        # self.sigmas_full = self.sigmas_full / min_sigma
-        self.masks_full = jnp.array(np.load(os.path.join(data_dir, "masks.npy")))       # shape: (T_full, max_vis)
-        self.num_vis_list = jnp.array(np.load(os.path.join(data_dir, "num_vis_list.npy")))
-        # We assume T_full = number of time frames in obs_frames.
-    
-    def _pixel_to_physical(self, pixel_indices):
-        """
-        Convert pixel indices (0 to num_samples-1) to physical coordinates in microarcseconds.
-        Returns a jnp.array of shape (num_samples, 2) where each row is [theta_x, theta_y].
-        """
+
+    def _pixel_to_physical(self, pixel_indices: np.ndarray) -> np.ndarray:
+        """Flat pixel indices -> centered network coordinates, (P, 2)."""
         x_coords = pixel_indices % self.width
         y_coords = pixel_indices // self.width
-        theta_x = (x_coords - self.width / 2) * self.pixel_size_x
-        theta_y = (y_coords - self.height / 2) * self.pixel_size_y
-        return jnp.stack([theta_x, theta_y], axis=-1)
-    
+        theta_x = (x_coords - self.width / 2.0) * self.pixel_size_x
+        theta_y = (y_coords - self.height / 2.0) * self.pixel_size_y
+        return np.stack([theta_x, theta_y], axis=-1).astype(np.float32)
+
     def _precompute_time_indices(self):
-        """Precompute a random set of time indices (of length num_time_samples) for each epoch."""
+        """Draw the random subset of frames used in each epoch up front."""
         self.precomputed_time_indices = []
-        frame_indices = jnp.arange(self.num_frames)
+        frame_indices = np.arange(self.num_frames, dtype=np.int64)
         for _ in range(self.epochs):
-            self.rng_key, subkey = random.split(self.rng_key)
-            t_indices = random.choice(subkey, frame_indices, shape=(self.num_time_samples,), replace=False)
+            t_indices = self.rng.choice(
+                frame_indices, size=self.num_time_samples, replace=False
+            )
             self.precomputed_time_indices.append(t_indices)
-    
-    def get_epoch_data(self, epoch):
+
+    def get_epoch_data(self, epoch: int):
+        """Batched arrays for one epoch.
+
+        Returns a tuple matching neural_dmd.train_epoch_jit:
+        (frame_batches (B, T_b, P), pixel_coords (P, 2),
+         As (B, T_b, M, P), targets, sigmas, masks (B, T_b, M),
+         times (B, T_b), amps, amp_sigmas (B, T_b, M),
+         cp_targets, cp_sigmas, cp_masks (B, T_b, K), triangles (B, T_b, K, 3, 2))
         """
-        For the given epoch, select a random subset of time frames and then batch the
-        corresponding A matrices, targets, sigma values, and masks over time.
-        
-        Returns a tuple:
-          (As_batches, targets_batches, sigmas_batches, mask_batches, time_batches)
-        with shapes:
-          - As_batches: (num_batches, batch_size, max_vis, num_samples)
-          - targets_batches: (num_batches, batch_size, max_vis)
-          - sigmas_batches: (num_batches, batch_size, max_vis)
-          - mask_batches: (num_batches, batch_size, max_vis)
-          - time_batches: (num_batches, batch_size)
-        """
-        # Get the precomputed time indices for this epoch.
-        time_indices = self.precomputed_time_indices[epoch]
+        time_indices = self.precomputed_time_indices[epoch % self.epochs]
         if self.shuffle:
-            self.rng_key, subkey = random.split(self.rng_key)
-            time_indices = random.permutation(subkey, time_indices)
-        
-        # Trim to a multiple of batch_size.
-        total_time = time_indices.shape[0]
-        total_trim = total_time - (total_time % self.batch_size)
+            time_indices = self.rng.permutation(time_indices)
+
+        # trim to a multiple of batch_size
+        total_trim = len(time_indices) - (len(time_indices) % self.batch_size)
         time_indices = time_indices[:total_trim]
-        times = self.times[time_indices]
-        time_batches = jnp.reshape(times, (-1, self.batch_size))
-        
-        # Get ground-truth frame data from the image cube.
-        frame_selected = self.data.reshape(self.num_frames, -1)[time_indices, :]  # (total_trim, H*W)
-        num_batches = time_batches.shape[0]
-        frame_batches = jnp.reshape(frame_selected, (num_batches, self.batch_size, -1))
-        
-        # Now, select the corresponding entries from the loaded npy arrays.
-        # We assume that these arrays have the first dimension corresponding to time.
-        As_selected = self.As_full[time_indices, ...]         # shape: (T_trim, max_vis, num_samples)
-        targets_selected = self.targets_full[time_indices, ...]   # shape: (T_trim, max_vis)
-        sigmas_selected = self.sigmas_full[time_indices, ...]     # shape: (T_trim, max_vis)
-        masks_selected = self.masks_full[time_indices, ...]       # shape: (T_trim, max_vis)
-        num_vis_selected = self.num_vis_list[time_indices, ...]
-        
-        num_batches = time_batches.shape[0]
-        As_batches = jnp.reshape(As_selected, (num_batches, self.batch_size, *As_selected.shape[1:]))
-        targets_batches = jnp.reshape(targets_selected, (num_batches, self.batch_size, *targets_selected.shape[1:]))
-        sigmas_batches = jnp.reshape(sigmas_selected, (num_batches, self.batch_size, *sigmas_selected.shape[1:]))
-        mask_batches = jnp.reshape(masks_selected, (num_batches, self.batch_size, *masks_selected.shape[1:]))
-        num_vis_batches = jnp.reshape(num_vis_selected, (num_batches, self.batch_size, *num_vis_selected.shape[1:]))
-        
-        return frame_batches, self.pixel_coords, As_batches, targets_batches, sigmas_batches, mask_batches, time_batches, num_vis_batches
+        num_batches = total_trim // self.batch_size
+
+        times = (
+            self.times[time_indices]
+            if self.times is not None
+            else time_indices.astype(np.float32)
+        )
+
+        def batched(arr):
+            sel = arr[time_indices, ...]
+            return sel.reshape(num_batches, self.batch_size, *sel.shape[1:])
+
+        frame_batches = batched(self.data.reshape(self.num_frames, -1))
+
+        return (
+            frame_batches,
+            self.pixel_coords,
+            batched(self.As_full),
+            batched(self.targets_full),
+            batched(self.sigmas_full),
+            batched(self.masks_full),
+            times.reshape(num_batches, self.batch_size),
+            batched(self.amp_targets),
+            batched(self.amp_sigmas),
+            batched(self.cp_targets_full),
+            batched(self.cp_sigmas_full),
+            batched(self.cp_masks_full),
+            batched(self.triangles),
+        )

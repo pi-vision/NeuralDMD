@@ -1,13 +1,19 @@
-astropy
-ehtim==1.2.10
+# core (training / evaluation)
+jax>=0.4.30
+equinox
+optax
+numpy
 h5py
 imageio
 matplotlib
-optax
 tqdm
-Cartopy
+
+# pixel tutorial (weather data)
 xarray
-scikit-image
-equinox
 netCDF4
-ngehtsim
+Cartopy
+
+# Fourier tutorial data generation (notebook 01 only; often a separate env)
+ehtim==1.2.10
+astropy
+scikit-image

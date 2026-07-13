@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Tutorial outputs (datasets, checkpoints, figures)
+tutorial/Fourier/data/
+tutorial/Fourier/models/
+tutorial/Fourier/plots/
+eht2017/data/
