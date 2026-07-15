@@ -11,6 +11,132 @@ import os
 
 import numpy as np
 
+from .observations import ObsProducts
+
+
+def _pixel_grid(npix: int, fov_x: float, fov_y: float) -> np.ndarray:
+    """Centered network coordinates for an ``npix x npix`` grid, ``(npix**2, 2)``.
+
+    Matches :meth:`DMDDataLoader._pixel_to_physical` (and the zernike grid) so the
+    polarized loader trains on the same coordinates as the scalar pipeline.
+    """
+    idx = np.arange(npix * npix, dtype=np.int64)
+    x = (idx % npix - npix / 2.0) * (fov_x / npix)
+    y = (idx // npix - npix / 2.0) * (fov_y / npix)
+    return np.stack([x, y], axis=-1).astype(np.float32)
+
+
+class PolarizedDMDDataLoader:
+    """Serves per-epoch, per-key visibility batches for a polarized model.
+
+    Wraps an :class:`~neuraldmd.data.observations.ObsProducts` (shared operator
+    ``A`` + per-key ``targets``/``sigmas``/``masks``). The keys are whatever the
+    dataset holds -- Stokes (``I``, ``Q``, ``U``) for the Stokes-basis loss, or
+    products (``RR``, ``LL``, ``RL``, ``LR``) for the circular-basis loss -- so the
+    same loader feeds :func:`neuraldmd.training.polarized_train_step` in either
+    basis. Batches match the scan in :func:`neuraldmd.training.polarized_train_epoch`.
+    """
+
+    def __init__(
+        self,
+        obs_products: ObsProducts,
+        npix: int,
+        batch_size: int,
+        epochs: int,
+        times=None,
+        fov_x: float = np.pi,
+        fov_y: float = np.pi,
+        time_fraction: float = 1.0,
+        shuffle: bool = True,
+        seed: int = 42,
+    ):
+        """Build the loader from an in-memory :class:`ObsProducts`.
+
+        Parameters
+        ----------
+        obs_products : ObsProducts
+            Shared ``A`` and per-key visibility products.
+        npix : int
+            Image grid side length; must satisfy ``npix**2 == A.shape[2]``.
+        batch_size : int
+            Number of time frames per batch.
+        epochs : int
+            Total epochs (per-epoch frame subsets are precomputed).
+        times : array-like or None
+            ``(T,)`` frame times (normalized to [0, 1]); defaults to the frame index.
+        fov_x, fov_y : float
+            Network coordinate extents (arbitrary units; physical scale is in ``A``).
+        time_fraction : float
+            Fraction of frames drawn per epoch.
+        shuffle : bool
+            Shuffle frame order within an epoch.
+        seed : int
+            RNG seed.
+        """
+        self.op = obs_products
+        self.keys = obs_products.stokes
+        n_t, _, n_pix = obs_products.A.shape
+        if npix * npix != n_pix:
+            raise ValueError(f"npix**2 ({npix * npix}) != A pixels ({n_pix})")
+
+        self.num_frames = n_t
+        self.pixel_coords = _pixel_grid(npix, fov_x, fov_y)
+        self.times = np.asarray(times, dtype=np.float32) if times is not None else None
+        self.batch_size = int(batch_size)
+        self.epochs = int(epochs)
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng(seed)
+
+        self.num_time_samples = int(float(time_fraction) * self.num_frames)
+        frame_indices = np.arange(self.num_frames, dtype=np.int64)
+        self._time_indices = [
+            self.rng.choice(frame_indices, size=self.num_time_samples, replace=False)
+            for _ in range(self.epochs)
+        ]
+
+    @classmethod
+    def from_obs_dir(cls, obs_dir, npix: int, batch_size: int, epochs: int, **kwargs):
+        """Load an :class:`ObsProducts` from ``obs_dir`` and wrap it (see ``__init__``)."""
+        return cls(ObsProducts.from_obs_dir(obs_dir), npix, batch_size, epochs, **kwargs)
+
+    def get_epoch_data(self, epoch: int):
+        """Batched arrays for one epoch, for :func:`polarized_train_epoch`.
+
+        Returns
+        -------
+        pixel_coords : ndarray
+            ``(P, 2)`` network coordinates.
+        As : ndarray
+            ``(B, batch_size, M, P)`` forward operators.
+        targets, sigmas, masks : dict of str -> ndarray
+            Per-key ``(B, batch_size, M)`` visibility products, errors, masks.
+        times : ndarray
+            ``(B, batch_size)`` frame times.
+        """
+        time_indices = self._time_indices[epoch % self.epochs]
+        if self.shuffle:
+            time_indices = self.rng.permutation(time_indices)
+        trim = len(time_indices) - (len(time_indices) % self.batch_size)
+        time_indices = time_indices[:trim]
+        n_batches = trim // self.batch_size
+
+        def batched(arr):
+            sel = arr[time_indices, ...]
+            return sel.reshape(n_batches, self.batch_size, *sel.shape[1:])
+
+        if self.times is not None:
+            times = self.times[time_indices]
+        else:
+            times = time_indices.astype(np.float32)
+        return (
+            self.pixel_coords,
+            batched(self.op.A),
+            {k: batched(self.op.targets[k]) for k in self.keys},
+            {k: batched(self.op.sigmas[k]) for k in self.keys},
+            {k: batched(self.op.masks[k]) for k in self.keys},
+            times.reshape(n_batches, self.batch_size),
+        )
+
 
 class DMDDataLoader:
     def __init__(

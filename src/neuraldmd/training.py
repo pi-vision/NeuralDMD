@@ -204,6 +204,160 @@ def polarized_train_step(
     return model, opt_state, loss, aux
 
 
+@eqx.filter_jit
+def polarized_train_epoch(
+    model,
+    opt_state,
+    epoch_data,
+    optimizer,
+    key,
+    frame_max,
+    frame_min,
+    *,
+    frozen_stokes: tuple[str, ...] = (),
+    basis: str = "stokes",
+    products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
+    p_le_i_weight: float = 0.0,
+):
+    """Scan :func:`polarized_train_step` over one epoch's batches.
+
+    ``epoch_data`` is a
+    ``(pixel_coords, As, targets, sigmas, masks, times)`` tuple from
+    :meth:`neuraldmd.data.loader.PolarizedDMDDataLoader.get_epoch_data`, with the
+    per-key dicts batched along a leading batch axis. Coordinates get small jitter
+    each step (as in :func:`train_epoch_jit`).
+
+    Returns
+    -------
+    model, opt_state, mean_loss, mean_chi2
+        ``mean_chi2`` is a dict keyed like the data (Stokes or product).
+    """
+    pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b = epoch_data
+    keys = tuple(tgt_b.keys())
+
+    def scan_fn(carry, i):
+        model, opt_state, key = carry
+        key, subkey = jax.random.split(key)
+        xy = pixel_coords + jax.random.normal(subkey, shape=pixel_coords.shape) * 0.01
+        model, opt_state, loss, aux = polarized_train_step(
+            model,
+            opt_state,
+            xy,
+            {k: tgt_b[k][i] for k in keys},
+            {k: sig_b[k][i] for k in keys},
+            {k: msk_b[k][i] for k in keys},
+            as_b[i],
+            times_b[i],
+            optimizer,
+            frame_max,
+            frame_min,
+            frozen_stokes=frozen_stokes,
+            basis=basis,
+            products=products,
+            neg_weight=neg_weight,
+            w_sparse_weight=w_sparse_weight,
+            b_sparse_weight=b_sparse_weight,
+            p_le_i_weight=p_le_i_weight,
+        )
+        return (model, opt_state, key), (loss, aux["chi2_vis"])
+
+    n_batches = as_b.shape[0]
+    (model, opt_state, _), (loss_log, chi2_log) = jax.lax.scan(
+        scan_fn, (model, opt_state, key), jnp.arange(n_batches)
+    )
+    mean_chi2 = {k: jnp.mean(v) for k, v in chi2_log.items()}
+    return model, opt_state, jnp.mean(loss_log), mean_chi2
+
+
+def train_polarized_model(
+    model,
+    loader,
+    num_epochs,
+    key,
+    models_dir,
+    frame_max,
+    frame_min,
+    *,
+    basis: str = "stokes",
+    products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
+    frozen_stokes: tuple[str, ...] = (),
+    initial_lr: float = 3e-4,
+    weight_decay: float = 1e-4,
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
+    p_le_i_weight: float = 0.0,
+    print_every: int = 50,
+    early_stop_chi2: float | None = None,
+    early_stop_epochs: int = 3,
+    fold_epoch_key: bool = True,
+):
+    """Train a :class:`PolarizedNeuralDMD` on a
+    :class:`~neuraldmd.data.loader.PolarizedDMDDataLoader`.
+
+    Objective is :func:`polarized_loss_fn` in the chosen ``basis``. Early stopping
+    triggers when the mean per-key chi-squared stays at or below ``early_stop_chi2``
+    for ``early_stop_epochs`` consecutive epochs (``None`` disables). The best
+    (lowest-loss) model is checkpointed.
+
+    Returns
+    -------
+    model, history
+        ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists).
+    """
+    os.makedirs(models_dir, exist_ok=True)
+    optimizer = make_polarized_optimizer(model, initial_lr=initial_lr, weight_decay=weight_decay)
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
+
+    history = {"total": [], "chi2": {k: [] for k in loader.keys}}
+    best_loss = jnp.inf
+    at_noise = 0
+
+    with tqdm(total=num_epochs) as pbar:
+        for epoch in range(num_epochs):
+            epoch_data = loader.get_epoch_data(epoch)
+            epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
+            model, opt_state, loss, chi2 = polarized_train_epoch(
+                model, opt_state, epoch_data, optimizer, epoch_key, frame_max, frame_min,
+                frozen_stokes=frozen_stokes, basis=basis, products=products,
+                neg_weight=neg_weight, w_sparse_weight=w_sparse_weight,
+                b_sparse_weight=b_sparse_weight, p_le_i_weight=p_le_i_weight,
+            )
+            history["total"].append(float(loss))
+            for k in loader.keys:
+                history["chi2"][k].append(float(chi2[k]))
+            mean_chi2 = float(sum(chi2.values()) / len(chi2))
+
+            pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{mean_chi2:.3f}")
+            pbar.update(1)
+            if (epoch + 1) % print_every == 0:
+                per_key = "  ".join(f"chi2_{k}={float(chi2[k]):.3f}" for k in loader.keys)
+                print(
+                    f"Epoch {epoch + 1}/{num_epochs}  loss={float(loss):.5f}  {per_key}",
+                    flush=True,
+                )
+
+            if loss < best_loss:
+                best_loss = loss
+                eqx.tree_serialise_leaves(ckpt_path, model)
+
+            if early_stop_chi2 is not None:
+                at_noise = at_noise + 1 if mean_chi2 <= early_stop_chi2 else 0
+                if at_noise >= early_stop_epochs:
+                    print(
+                        f"Early stop at epoch {epoch + 1}: mean chi2 <= {early_stop_chi2}",
+                        flush=True,
+                    )
+                    break
+
+    print(f"Best checkpoint saved to {ckpt_path}")
+    return model, history
+
+
 class PlateauScheduler:
     """Reduce the LR by ``factor`` after ``patience`` non-improving epochs.
 
