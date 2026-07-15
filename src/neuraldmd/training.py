@@ -115,6 +115,13 @@ def train_epoch_jit(model, opt_state, batch_list, optimizer, key, frame_max, fra
 
 
 class PlateauScheduler:
+    """Reduce the LR by ``factor`` after ``patience`` non-improving epochs.
+
+    Note: the default ``factor=1.0`` makes this a **no-op** (``new_lr == lr`` so
+    the ``new_lr < lr`` guard never fires; the LR is held constant). Set
+    ``factor < 1.0`` (e.g. 0.5) to actually anneal on plateau.
+    """
+
     def __init__(self, initial_lr, factor=1.0, patience=500, min_lr=1e-8):
         self.lr = initial_lr
         self.factor = factor
@@ -172,6 +179,7 @@ def train_model(
     plot_every=500,
     early_stop_chi2=1.0,
     early_stop_epochs=3,
+    fold_epoch_key=True,
 ):
     """Train on visibilities; see loss_fn for the objective.
 
@@ -200,8 +208,11 @@ def train_model(
     with tqdm(total=num_epochs) as pbar:
         for epoch in range(num_epochs):
             epoch_data = train_loader.get_epoch_data(epoch)
+            # Fold the epoch into the key so each epoch's coordinate-jitter RNG
+            # stream is distinct (previously the same key was reused every epoch).
+            epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
             model, opt_state, (loss, rec, chi2_vis, chi2_amp, chi2_cp) = train_epoch_jit(
-                model, opt_state, epoch_data, optimizer, key, frame_max, frame_min
+                model, opt_state, epoch_data, optimizer, epoch_key, frame_max, frame_min
             )
 
             history["total"].append(float(loss))

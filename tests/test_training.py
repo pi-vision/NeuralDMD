@@ -58,3 +58,41 @@ def test_mini_train_reduces_chi2(tiny_obs):
     assert np.isfinite(chi2).all()
     assert chi2[-1] < chi2[0]  # training reduces the data misfit
     assert min(chi2) < 0.5 * chi2[0]  # meaningful, not marginal, improvement
+
+
+def _one_epoch_spatial_weight(tiny_obs, epoch_key):
+    model = NeuralDMD(r=4, key=jax.random.PRNGKey(1), num_frequencies=2)
+    loader = DMDDataLoader(
+        data=tiny_obs.movie,
+        batch_size=2,
+        epochs=1,
+        data_dir=tiny_obs.data_dir,
+        times=tiny_obs.times,
+        fov_x=tiny_obs.fov,
+        fov_y=tiny_obs.fov,
+        time_fraction=1.0,
+        seed=0,
+    )
+    opt = optax.adam(1e-2)
+    opt_state = opt.init(eqx.filter(model, eqx.is_array))
+    data = loader.get_epoch_data(0)
+    m, _, _ = train_epoch_jit(
+        model,
+        opt_state,
+        data,
+        opt,
+        epoch_key,
+        float(tiny_obs.movie.max()),
+        float(tiny_obs.movie.min()),
+    )
+    return np.asarray(m.mlp.in_proj.weight)
+
+
+def test_per_epoch_key_folding_varies_training(tiny_obs):
+    k = jax.random.PRNGKey(0)
+    k0, k1 = jax.random.fold_in(k, 0), jax.random.fold_in(k, 1)
+    assert not np.array_equal(np.asarray(k0), np.asarray(k1))  # distinct epoch keys
+    # distinct keys -> distinct coordinate jitter -> distinct spatial-net updates
+    assert not np.allclose(
+        _one_epoch_spatial_weight(tiny_obs, k0), _one_epoch_spatial_weight(tiny_obs, k1)
+    )
