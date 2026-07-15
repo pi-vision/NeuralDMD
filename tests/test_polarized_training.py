@@ -76,8 +76,19 @@ def test_freeze_intensity_holds_i_but_trains_pol():
     before = eqx.filter(model, eqx.is_array)
     for _ in range(5):
         model, opt_state, _, _ = polarized_train_step(
-            model, opt_state, xy, targets, sig, msk, a, ti, opt, fmax, fmin,
-            freeze_intensity=True, **_NOPEN,
+            model,
+            opt_state,
+            xy,
+            targets,
+            sig,
+            msk,
+            a,
+            ti,
+            opt,
+            fmax,
+            fmin,
+            freeze_intensity=True,
+            **_NOPEN,
         )
     after = eqx.filter(model, eqx.is_array)
 

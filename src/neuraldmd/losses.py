@@ -183,8 +183,7 @@ def polarized_loss_fn(
     """
     images, modes = model.stokes_fields(xy, time_indices, frame_max, frame_min)
     vis_stokes = {
-        s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64))
-        for s in model.stokes
+        s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64)) for s in model.stokes
     }
     sparse_total = 0.0
     for w0, w, b0, b in modes:

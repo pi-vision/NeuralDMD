@@ -138,7 +138,7 @@ def plot_mode_bank(cols, labels, H, W, which="real", cols_per_row=6, savepath=No
     for k in range(K):
         img = np.asarray(take(cols[:, k])).reshape(H, W)
         cmap = "viridis" if which == "abs" else "RdBu"
-        axes[k].imshow(img, cmap=cmap)
+        axes[k].imshow(img, cmap=cmap, interpolation="bicubic")
         axes[k].set_title(labels[k], fontsize=9)
         axes[k].axis("off")
     for ax in axes[K:]:

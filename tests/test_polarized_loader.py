@@ -76,9 +76,18 @@ def test_end_to_end_minitrain_reduces_loss(tmp_path):
     fmax = {s: 1.0 for s in op.stokes}
     fmin = {s: 0.0 for s in op.stokes}
     model, hist = train_polarized_model(
-        model, loader, num_epochs=15, key=jax.random.PRNGKey(1), models_dir=str(tmp_path),
-        frame_max=fmax, frame_min=fmin, initial_lr=3e-3,
-        neg_weight=0.0, w_sparse_weight=0.0, b_sparse_weight=0.0, print_every=1000,
+        model,
+        loader,
+        num_epochs=15,
+        key=jax.random.PRNGKey(1),
+        models_dir=str(tmp_path),
+        frame_max=fmax,
+        frame_min=fmin,
+        initial_lr=3e-3,
+        neg_weight=0.0,
+        w_sparse_weight=0.0,
+        b_sparse_weight=0.0,
+        print_every=1000,
     )
     assert hist["total"][-1] < hist["total"][0]
     for s in op.stokes:

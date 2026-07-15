@@ -14,9 +14,7 @@ from neuraldmd.data.observations import ObsProducts  # noqa: E402
 
 pytestmark = [pytest.mark.ehtim, pytest.mark.filterwarnings("ignore")]
 
-GEN_KW = dict(
-    npix=16, num_frames=8, tstart_hr=9.0, tstop_hr=10.0, tint=60.0, fractional_noise=0.0
-)
+GEN_KW = dict(npix=16, num_frames=8, tstart_hr=9.0, tstop_hr=10.0, tint=60.0, fractional_noise=0.0)
 
 
 def test_generate_stokes_dataset(tmp_path):

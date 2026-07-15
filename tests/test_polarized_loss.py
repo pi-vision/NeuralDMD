@@ -61,12 +61,35 @@ def test_i_only_matches_legacy_loss():
     w = dict(neg_weight=1.0, w_sparse_weight=0.0, b_sparse_weight=0.0)
 
     legacy_total, legacy_aux = loss_fn(
-        ref, d["xy"], d["fb"], d["vt"], d["vs"], d["vm"], d["at"], d["as_"],
-        d["ct"], d["cs"], d["cm"], d["tri"], d["A"], d["ti"], 1.2, 0.0, **w,
+        ref,
+        d["xy"],
+        d["fb"],
+        d["vt"],
+        d["vs"],
+        d["vm"],
+        d["at"],
+        d["as_"],
+        d["ct"],
+        d["cs"],
+        d["cm"],
+        d["tri"],
+        d["A"],
+        d["ti"],
+        1.2,
+        0.0,
+        **w,
     )
     pol_total, pol_aux = polarized_loss_fn(
-        pol, d["xy"], {"I": d["vt"]}, {"I": d["vs"]}, {"I": d["vm"]},
-        d["A"], d["ti"], {"I": 1.2}, {"I": 0.0}, **w,
+        pol,
+        d["xy"],
+        {"I": d["vt"]},
+        {"I": d["vs"]},
+        {"I": d["vm"]},
+        d["A"],
+        d["ti"],
+        {"I": 1.2},
+        {"I": 0.0},
+        **w,
     )
     np.testing.assert_allclose(float(pol_total), float(legacy_total), rtol=1e-6)
     np.testing.assert_allclose(float(pol_aux["chi2_vis"]["I"]), float(legacy_aux[1]), rtol=1e-6)
@@ -82,8 +105,18 @@ def test_total_sums_per_stokes_chi2_plus_penalties():
     fmax = {s: 1.0 for s in ("I", "Q", "U")}
     fmin = {s: 0.0 for s in ("I", "Q", "U")}
     total, aux = polarized_loss_fn(
-        pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin,
-        neg_weight=1.0, w_sparse_weight=0.0, b_sparse_weight=0.0,
+        pol,
+        d["xy"],
+        tgt,
+        sig,
+        msk,
+        d["A"],
+        d["ti"],
+        fmax,
+        fmin,
+        neg_weight=1.0,
+        w_sparse_weight=0.0,
+        b_sparse_weight=0.0,
     )
     assert set(aux["chi2_vis"]) == {"I", "Q", "U"}
     chi2_sum = sum(float(v) for v in aux["chi2_vis"].values())
@@ -99,16 +132,30 @@ def test_p_le_i_penalty_only_adds_load():
     # I-only: no polarized Stokes -> penalty must be exactly 0 even if weighted
     poli = PolarizedNeuralDMD(("I",), r=3, key=jax.random.PRNGKey(2), **MODEL_KW)
     _, auxi = polarized_loss_fn(
-        poli, d["xy"], {"I": d["vt"]}, {"I": d["vs"]}, {"I": d["vm"]},
-        d["A"], d["ti"], {"I": 1.0}, {"I": 0.0}, p_le_i_weight=10.0,
+        poli,
+        d["xy"],
+        {"I": d["vt"]},
+        {"I": d["vs"]},
+        {"I": d["vm"]},
+        d["A"],
+        d["ti"],
+        {"I": 1.0},
+        {"I": 0.0},
+        p_le_i_weight=10.0,
     )
     assert float(auxi["p_penalty"]) == 0.0
 
     pol = PolarizedNeuralDMD(("I", "Q", "U"), r=3, key=jax.random.PRNGKey(3), **MODEL_KW)
     args = (
-        pol, d["xy"], {s: d["vt"] for s in "IQU"}, {s: d["vs"] for s in "IQU"},
-        {s: d["vm"] for s in "IQU"}, d["A"], d["ti"],
-        {s: 1.0 for s in "IQU"}, {s: 0.0 for s in "IQU"},
+        pol,
+        d["xy"],
+        {s: d["vt"] for s in "IQU"},
+        {s: d["vs"] for s in "IQU"},
+        {s: d["vm"] for s in "IQU"},
+        d["A"],
+        d["ti"],
+        {s: 1.0 for s in "IQU"},
+        {s: 0.0 for s in "IQU"},
     )
     t_off, _ = polarized_loss_fn(*args, p_le_i_weight=0.0)
     t_on, aux_on = polarized_loss_fn(*args, p_le_i_weight=5.0)
@@ -122,9 +169,15 @@ def test_polarized_loss_is_jittable():
     d = _batch()
     jitted = eqx.filter_jit(polarized_loss_fn)
     total, aux = jitted(
-        pol, d["xy"], {s: d["vt"] for s in "IQ"}, {s: d["vs"] for s in "IQ"},
-        {s: d["vm"] for s in "IQ"}, d["A"], d["ti"],
-        {s: 1.0 for s in "IQ"}, {s: 0.0 for s in "IQ"},
+        pol,
+        d["xy"],
+        {s: d["vt"] for s in "IQ"},
+        {s: d["vs"] for s in "IQ"},
+        {s: d["vm"] for s in "IQ"},
+        d["A"],
+        d["ti"],
+        {s: 1.0 for s in "IQ"},
+        {s: 0.0 for s in "IQ"},
     )
     assert np.isfinite(float(total))
     assert set(aux["chi2_vis"]) == {"I", "Q"}
@@ -169,8 +222,19 @@ def test_circular_perfect_fit_is_zero():
     sig = {p: jnp.ones_like(d["vs"]) for p in _PRODUCTS}
     msk = {p: jnp.ones_like(d["vm"]) for p in _PRODUCTS}
     _, aux = polarized_loss_fn(
-        pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin,
-        basis="circular", neg_weight=0.0, w_sparse_weight=0.0, b_sparse_weight=0.0,
+        pol,
+        d["xy"],
+        tgt,
+        sig,
+        msk,
+        d["A"],
+        d["ti"],
+        fmax,
+        fmin,
+        basis="circular",
+        neg_weight=0.0,
+        w_sparse_weight=0.0,
+        b_sparse_weight=0.0,
     )
     for p in _PRODUCTS:
         np.testing.assert_allclose(float(aux["chi2_vis"][p]), 0.0, atol=1e-4)
@@ -185,15 +249,24 @@ def test_circular_product_chi2_matches_manual():
     sig = {p: d["vs"] for p in _PRODUCTS}
     msk = {p: d["vm"] for p in _PRODUCTS}
     _, aux = polarized_loss_fn(
-        pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin,
-        basis="circular", neg_weight=0.0, w_sparse_weight=0.0, b_sparse_weight=0.0,
+        pol,
+        d["xy"],
+        tgt,
+        sig,
+        msk,
+        d["A"],
+        d["ti"],
+        fmax,
+        fmin,
+        basis="circular",
+        neg_weight=0.0,
+        w_sparse_weight=0.0,
+        b_sparse_weight=0.0,
     )
     prod = _model_products(pol, d, fmax, fmin)
     p = "RL"
     m, s, t = np.asarray(msk[p]), np.asarray(sig[p]), np.asarray(tgt[p])
-    manual = float(
-        np.sum(np.abs(prod[p] - t) ** 2 * m / s**2) / (2.0 * np.sum(m))
-    )
+    manual = float(np.sum(np.abs(prod[p] - t) ** 2 * m / s**2) / (2.0 * np.sum(m)))
     np.testing.assert_allclose(float(aux["chi2_vis"][p]), manual, rtol=1e-4)
 
 
@@ -207,7 +280,16 @@ def test_circular_v_absent_makes_rr_and_ll_chi2_equal():
     sig = {p: d["vs"] for p in _PRODUCTS}
     msk = {p: d["vm"] for p in _PRODUCTS}
     _, aux = polarized_loss_fn(
-        pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin, basis="circular",
+        pol,
+        d["xy"],
+        tgt,
+        sig,
+        msk,
+        d["A"],
+        d["ti"],
+        fmax,
+        fmin,
+        basis="circular",
     )
     np.testing.assert_allclose(
         float(aux["chi2_vis"]["RR"]), float(aux["chi2_vis"]["LL"]), rtol=1e-6
@@ -223,9 +305,7 @@ def test_circular_basis_jittable():
     sig = {p: d["vs"] for p in _PRODUCTS}
     msk = {p: d["vm"] for p in _PRODUCTS}
     jitted = eqx.filter_jit(polarized_loss_fn)
-    total, aux = jitted(
-        pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin, basis="circular"
-    )
+    total, aux = jitted(pol, d["xy"], tgt, sig, msk, d["A"], d["ti"], fmax, fmin, basis="circular")
     assert np.isfinite(float(total))
     assert set(aux["chi2_vis"]) == set(_PRODUCTS)
     assert aux["basis"] == "circular"
@@ -238,6 +318,14 @@ def test_invalid_basis_raises():
     fmax, fmin = _iqu_scaling()
     with pytest.raises(ValueError, match="basis must be"):
         polarized_loss_fn(
-            pol, d["xy"], {s: d["vt"] for s in "IQU"}, {s: d["vs"] for s in "IQU"},
-            {s: d["vm"] for s in "IQU"}, d["A"], d["ti"], fmax, fmin, basis="linear",
+            pol,
+            d["xy"],
+            {s: d["vt"] for s in "IQU"},
+            {s: d["vs"] for s in "IQU"},
+            {s: d["vm"] for s in "IQU"},
+            d["A"],
+            d["ti"],
+            fmax,
+            fmin,
+            basis="linear",
         )

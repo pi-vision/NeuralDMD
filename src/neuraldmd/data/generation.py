@@ -705,9 +705,19 @@ def generate_polarized_dataset(
 
     tadv = float((tstop_hr - tstart_hr) * 3600.0 / max(num_frames - 1, 1))
     obs = movie.observe(
-        array, tint, tadv, tstart_hr, tstop_hr, bw,
-        polrep_obs="stokes", ttype=ttype, add_th_noise=True,
-        ampcal=ampcal, phasecal=phasecal, seed=seed, verbose=False,
+        array,
+        tint,
+        tadv,
+        tstart_hr,
+        tstop_hr,
+        bw,
+        polrep_obs="stokes",
+        ttype=ttype,
+        add_th_noise=True,
+        ampcal=ampcal,
+        phasecal=phasecal,
+        seed=seed,
+        verbose=False,
     )
     if fractional_noise:
         obs = obs.add_fractional_noise(fractional_noise)

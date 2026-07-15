@@ -295,8 +295,13 @@ def make_mring_hs_pol_movie(
         r = ring_radius_uas * eh.RADPERUAS
         im = im.add_gauss(
             hs_flux,
-            [hs_fwhm_uas * eh.RADPERUAS, hs_fwhm_uas * eh.RADPERUAS, 0.0,
-             r * np.cos(angle), r * np.sin(angle)],
+            [
+                hs_fwhm_uas * eh.RADPERUAS,
+                hs_fwhm_uas * eh.RADPERUAS,
+                0.0,
+                r * np.cos(angle),
+                r * np.sin(angle),
+            ],
             pol=None,
         )
         im.time = float(t)

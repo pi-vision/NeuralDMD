@@ -54,7 +54,9 @@ def plot_modes(W, height, width, file_dir=None, title="Mode", part="real"):
         vmax = np.abs(mode_i).max()
         vmin = 0.0 if part == "abs" else -vmax
         cmap = "inferno" if part == "abs" else "RdBu_r"
-        im = axes[i].imshow(mode_i, cmap=cmap, norm=Normalize(vmin=vmin, vmax=vmax))
+        im = axes[i].imshow(
+            mode_i, cmap=cmap, norm=Normalize(vmin=vmin, vmax=vmax), interpolation="bicubic"
+        )
         axes[i].set_title(f"{title} {i}", fontsize=10)
         axes[i].axis("off")
         divider = make_axes_locatable(axes[i])
@@ -115,7 +117,7 @@ def plot_frames(frame_list, titles=None, suptitle=None, file_path=None, vmax=Non
     fig, axes = plt.subplots(1, n, figsize=(3 * n, 3))
     axes = np.atleast_1d(axes)
     for i, (ax, f) in enumerate(zip(axes, frame_list, strict=False)):
-        ax.imshow(f, cmap="afmhot", vmin=0, vmax=vmax)
+        ax.imshow(f, cmap="afmhot", vmin=0, vmax=vmax, interpolation="bicubic")
         if titles:
             ax.set_title(titles[i], fontsize=10)
         ax.axis("off")
@@ -337,7 +339,15 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, s
     q, u = np.asarray(q), np.asarray(u)
     _, nx = intensity.shape
     lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
-    bg = ax.imshow(intensity, cmap=cmap_bg, origin="upper", vmin=0.0, vmax=vmax, extent=lims)
+    bg = ax.imshow(
+        intensity,
+        cmap=cmap_bg,
+        origin="upper",
+        vmin=0.0,
+        vmax=vmax,
+        extent=lims,
+        interpolation="bicubic",
+    )
 
     px = fov_uas / nx
     yy, xx = np.mgrid[slice(-fov_uas / 2, fov_uas / 2, px), slice(-fov_uas / 2, fov_uas / 2, px)]
@@ -359,10 +369,18 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, s
     if skip is None:
         skip = max(1, nx // 20)
     quiv = ax.quiver(
-        -xx[::skip, ::skip], -yy[::skip, ::skip],
-        vx[::skip, ::skip], vy[::skip, ::skip], mfrac[::skip, ::skip],
-        cmap="rainbow", norm=Normalize(vmin=0.0, vmax=0.5),
-        headlength=0, headwidth=1, pivot="mid", scale=16, width=0.01,
+        -xx[::skip, ::skip],
+        -yy[::skip, ::skip],
+        vx[::skip, ::skip],
+        vy[::skip, ::skip],
+        mfrac[::skip, ::skip],
+        cmap="rainbow",
+        norm=Normalize(vmin=0.0, vmax=0.5),
+        headlength=0,
+        headwidth=1,
+        pivot="mid",
+        scale=16,
+        width=0.01,
     )
     ax.set_xticks([])
     ax.set_yticks([])
@@ -382,7 +400,9 @@ def plot_polarized_summary(recon, truth, path, frame=None, fov_uas=200.0):
     for col, s in enumerate(["I", "Q", "U"]):
         cmap = "afmhot" if s == "I" else "coolwarm"
         for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
-            axes[row, col].imshow(pick(cube[s]), cmap=cmap, origin="upper", extent=lims)
+            axes[row, col].imshow(
+                pick(cube[s]), cmap=cmap, origin="upper", extent=lims, interpolation="bicubic"
+            )
             axes[row, col].set_title(f"{label} {s}")
             axes[row, col].axis("off")
 
@@ -428,7 +448,15 @@ def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
             _evpa_quiver(ax, intensity[t], q[t], u[t], fov_uas, cmap_bg=cmap, vmax=vmax)
         else:
             lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
-            ax.imshow(intensity[t], cmap=cmap, origin="upper", vmin=0.0, vmax=vmax, extent=lims)
+            ax.imshow(
+                intensity[t],
+                cmap=cmap,
+                origin="upper",
+                vmin=0.0,
+                vmax=vmax,
+                extent=lims,
+                interpolation="bicubic",
+            )
         ax.axis("off")
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())

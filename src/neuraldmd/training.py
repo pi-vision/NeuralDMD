@@ -208,9 +208,20 @@ def polarized_train_step(
 
     def loss_wrap(m):
         return polarized_loss_fn(
-            m, xy, targets, sigmas, masks, A_batch, time_indices, frame_max, frame_min,
-            basis=basis, products=products, neg_weight=neg_weight,
-            w_sparse_weight=w_sparse_weight, b_sparse_weight=b_sparse_weight,
+            m,
+            xy,
+            targets,
+            sigmas,
+            masks,
+            A_batch,
+            time_indices,
+            frame_max,
+            frame_min,
+            basis=basis,
+            products=products,
+            neg_weight=neg_weight,
+            w_sparse_weight=w_sparse_weight,
+            b_sparse_weight=b_sparse_weight,
             p_le_i_weight=p_le_i_weight,
         )
 
@@ -333,8 +344,12 @@ def train_polarized_model(
     """
     os.makedirs(models_dir, exist_ok=True)
     optimizer = make_polarized_optimizer(
-        model, initial_lr=initial_lr, weight_decay=weight_decay,
-        optimizer=optimizer_name, lr_decay_rate=lr_decay_rate, lr_decay_steps=lr_decay_steps,
+        model,
+        initial_lr=initial_lr,
+        weight_decay=weight_decay,
+        optimizer=optimizer_name,
+        lr_decay_rate=lr_decay_rate,
+        lr_decay_steps=lr_decay_steps,
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
@@ -348,10 +363,20 @@ def train_polarized_model(
             epoch_data = loader.get_epoch_data(epoch)
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
             model, opt_state, loss, chi2 = polarized_train_epoch(
-                model, opt_state, epoch_data, optimizer, epoch_key, frame_max, frame_min,
-                freeze_intensity=freeze_intensity, basis=basis, products=products,
-                neg_weight=neg_weight, w_sparse_weight=w_sparse_weight,
-                b_sparse_weight=b_sparse_weight, p_le_i_weight=p_le_i_weight,
+                model,
+                opt_state,
+                epoch_data,
+                optimizer,
+                epoch_key,
+                frame_max,
+                frame_min,
+                freeze_intensity=freeze_intensity,
+                basis=basis,
+                products=products,
+                neg_weight=neg_weight,
+                w_sparse_weight=w_sparse_weight,
+                b_sparse_weight=b_sparse_weight,
+                p_le_i_weight=p_le_i_weight,
             )
             history["total"].append(float(loss))
             for k in loader.keys:

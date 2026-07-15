@@ -38,8 +38,12 @@ def parse_args():
     ap.add_argument("--no-pretrain", action="store_true", help="Skip the Stokes-I pretrain")
     ap.add_argument("--pretrain-steps", type=int, default=2000)
     ap.add_argument("--pretrain-lr", type=float, default=1e-4)
-    ap.add_argument("--pretrain-radius", type=float, default=1.0,
-                    help="disk-template radius as a multiple of the gyration radius")
+    ap.add_argument(
+        "--pretrain-radius",
+        type=float,
+        default=1.0,
+        help="disk-template radius as a multiple of the gyration radius",
+    )
     # optimizer / LR schedule (exponential annealing when decay-rate < 1)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam", "adamax"])
     ap.add_argument("--lr-decay-rate", type=float, default=1.0, help="<1 enables exp decay")
@@ -75,8 +79,14 @@ def main():
     else:
         print("Generating polarized dataset ...", flush=True)
         op = generate_polarized_dataset(
-            data_dir, npix=args.npix, fov_uas=args.fov_uas, num_frames=args.num_frames,
-            linpol_frac=args.frac_pol, stokes=stokes, basis=args.basis, seed=args.seed,
+            data_dir,
+            npix=args.npix,
+            fov_uas=args.fov_uas,
+            num_frames=args.num_frames,
+            linpol_frac=args.frac_pol,
+            stokes=stokes,
+            basis=args.basis,
+            seed=args.seed,
         )
     print(f"Dataset keys={op.stokes}  A={op.A.shape}", flush=True)
 
@@ -93,27 +103,44 @@ def main():
         op, npix=args.npix, batch_size=args.batch_size, epochs=args.epochs, fov_x=np.pi, fov_y=np.pi
     )
     model = PolarizedNeuralDMD(
-        stokes, r=args.r, key=jax.random.PRNGKey(args.seed),
-        outshift=args.outshift, scaling_ml=args.scaling_ml,
-        hidden_size=args.hidden_size, num_layers=args.num_layers,
+        stokes,
+        r=args.r,
+        key=jax.random.PRNGKey(args.seed),
+        outshift=args.outshift,
+        scaling_ml=args.scaling_ml,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
     )
 
     if not args.no_pretrain:
         print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
         model, _ = pretrain_stokes_i(
-            model, truth_cubes["I"], num_steps=args.pretrain_steps,
-            lr=args.pretrain_lr, radius_scale=args.pretrain_radius,
+            model,
+            truth_cubes["I"],
+            num_steps=args.pretrain_steps,
+            lr=args.pretrain_lr,
+            radius_scale=args.pretrain_radius,
             key=jax.random.PRNGKey(args.seed + 2),
         )
 
     extra = {"products": op.stokes} if args.basis == "circular" else {}
     print(f"Training ({args.basis} basis, {args.optimizer}, {args.epochs} epochs) ...", flush=True)
     model, hist = train_polarized_model(
-        model, loader, num_epochs=args.epochs, key=jax.random.PRNGKey(args.seed + 1),
-        models_dir=str(out / "models"), frame_max=frame_max, frame_min=frame_min,
-        basis=args.basis, initial_lr=args.lr, optimizer_name=args.optimizer,
-        lr_decay_rate=args.lr_decay_rate, lr_decay_steps=args.lr_decay_steps,
-        early_stop_chi2=args.early_stop_chi2, print_every=200, **extra,
+        model,
+        loader,
+        num_epochs=args.epochs,
+        key=jax.random.PRNGKey(args.seed + 1),
+        models_dir=str(out / "models"),
+        frame_max=frame_max,
+        frame_min=frame_min,
+        basis=args.basis,
+        initial_lr=args.lr,
+        optimizer_name=args.optimizer,
+        lr_decay_rate=args.lr_decay_rate,
+        lr_decay_steps=args.lr_decay_steps,
+        early_stop_chi2=args.early_stop_chi2,
+        print_every=200,
+        **extra,
     )
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
@@ -126,8 +153,11 @@ def main():
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:
         recon_movie = to_ehtim_movie(
-            recon["I"].astype(np.float64), truth["times"], fov_uas=args.fov_uas,
-            qframes=recon["Q"].astype(np.float64), uframes=recon["U"].astype(np.float64),
+            recon["I"].astype(np.float64),
+            truth["times"],
+            fov_uas=args.fov_uas,
+            qframes=recon["Q"].astype(np.float64),
+            uframes=recon["U"].astype(np.float64),
         )
         save_movie_hdf5(recon_movie, str(out / "recon_pol.hdf5"))
     except Exception as exc:

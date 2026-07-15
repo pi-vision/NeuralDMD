@@ -170,8 +170,14 @@ def pretrain_stokes_i(
     _, height, width = np.asarray(truth_i).shape
     r_g, _ = radius_of_gyration(truth_i, fov_x=fov, fov_y=fov)
     z_targets, _picked, _mask, xy = build_zernike_targets(
-        height, width, radius_scale * r_g, fov, fov, model_i.r + 1,
-        max_n=max_n, prefer_ms=(0, 1, 2, 3),
+        height,
+        width,
+        radius_scale * r_g,
+        fov,
+        fov,
+        model_i.r + 1,
+        max_n=max_n,
+        prefer_ms=(0, 1, 2, 3),
     )
     trained_i, losses = pretrain_model(model_i, xy, z_targets, num_steps=num_steps, lr=lr, key=key)
     return polarized_model.replace_i_submodel(trained_i), losses

@@ -18,8 +18,12 @@ from neuraldmd.polarized import PolarizedNeuralDMD
 from neuraldmd.training import make_polarized_optimizer, polarized_train_step
 
 MODEL_KW = dict(
-    hidden_size=32, num_layers=2, num_frequencies=2,
-    temporal_latent_dim=16, temporal_hidden=32, temporal_layers=2,
+    hidden_size=32,
+    num_layers=2,
+    num_frequencies=2,
+    temporal_latent_dim=16,
+    temporal_hidden=32,
+    temporal_layers=2,
 )
 
 
@@ -31,6 +35,7 @@ def _xy_times(p=64, t=4):
 # --------------------------------------------------------------------------
 # config + pytree
 # --------------------------------------------------------------------------
+
 
 def test_stokesconfig_validation():
     """StokesConfig defaults to IQU and rejects malformed selections."""
@@ -86,6 +91,7 @@ def test_v_channel_present_only_when_requested():
 # physical guarantees
 # --------------------------------------------------------------------------
 
+
 def test_i_channel_is_a_faithful_neuraldmd():
     """The I field equals a standalone NeuralDMD built from the same split key --
     the polarized model does not perturb Stokes I."""
@@ -115,8 +121,12 @@ def test_p_le_scaled_i_by_construction():
     cap = 0.9
     for seed in range(3):
         m = PolarizedNeuralDMD(
-            ("I", "Q", "U"), r=3, key=jax.random.PRNGKey(seed),
-            outshift=0.0, scaling_ml=cap, **MODEL_KW,
+            ("I", "Q", "U"),
+            r=3,
+            key=jax.random.PRNGKey(seed),
+            outshift=0.0,
+            scaling_ml=cap,
+            **MODEL_KW,
         )
         images, _ = m.stokes_fields(*_xy_times(), {"I": 2.0}, {"I": 0.0})
         p = linear_polarized_intensity(np.asarray(images["Q"]), np.asarray(images["U"]))
@@ -138,6 +148,7 @@ def test_pol_vanishes_where_i_vanishes():
 # --------------------------------------------------------------------------
 # training
 # --------------------------------------------------------------------------
+
 
 def test_model_trains():
     """The model composes with the loss/optimizer and reduces the loss."""

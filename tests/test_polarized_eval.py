@@ -9,8 +9,12 @@ from neuraldmd.evaluation import evpa_error_deg, polarized_nrmse, reconstruct_po
 from neuraldmd.polarized import PolarizedNeuralDMD
 
 MODEL_KW = dict(
-    hidden_size=32, num_layers=2, num_frequencies=2,
-    temporal_latent_dim=16, temporal_hidden=32, temporal_layers=2,
+    hidden_size=32,
+    num_layers=2,
+    num_frequencies=2,
+    temporal_latent_dim=16,
+    temporal_hidden=32,
+    temporal_layers=2,
 )
 
 
