@@ -33,6 +33,13 @@ def parse_args():
     ap.add_argument("--hidden-size", type=int, default=256)
     ap.add_argument("--num-layers", type=int, default=4)
     ap.add_argument(
+        "--frequencies",
+        type=int,
+        default=2,
+        help="Stokes-I positional-encoding frequencies; the finest representable "
+        "feature is ~fov/2^freq, so a thin ring / sharp background edge needs >2",
+    )
+    ap.add_argument(
         "--theta-max",
         type=float,
         default=1.0,
@@ -227,6 +234,7 @@ def main():
         pol_model_kwargs=pol_kwargs or None,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
+        num_frequencies=args.frequencies,
         theta_max=args.theta_max,
     )
 
