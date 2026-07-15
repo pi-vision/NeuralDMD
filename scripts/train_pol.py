@@ -272,6 +272,9 @@ def main():
             **common,
         )
         total_epochs += len(hist_a["total"])
+        ev.plot_training_history(
+            hist_a, str(out / "loss_history_stageA.png"), title="Stage A: I-only"
+        )
         print(f"Stage B: pol on frozen I (all products), {args.epochs} epochs ...", flush=True)
         model, hist = train_polarized_model(
             model,
@@ -300,6 +303,7 @@ def main():
             **extra,
         )
     total_epochs += len(hist["total"])
+    ev.plot_training_history(hist, str(out / "loss_history.png"), title="Training")
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
     nrmse = ev.polarized_nrmse(recon, truth_cubes)

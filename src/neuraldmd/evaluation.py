@@ -602,3 +602,64 @@ def make_polarized_comparison_gif(
 
     iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
     print(f"Saved {path}")
+
+
+def plot_training_history(history, path, floor=None, title=None):
+    """Plot the training loss, per-key chi-squared, and gradient norm vs epoch.
+
+    The chi-squared panel overlays the *true* per-epoch chi-squared (the model
+    re-evaluated on the full data, solid) against the per-batch training proxy
+    (dashed) so a decoupling between them is visible at a glance.
+
+    Parameters
+    ----------
+    history : dict
+        As returned by :func:`neuraldmd.training.train_polarized_model`:
+        ``{"total": [...], "grad_norm": [...], "chi2": {key: [...]},
+        "train_chi2": {key: [...]}}``.
+    path : str
+        Output PNG path.
+    floor : float or None, optional
+        Draw a reference line at this chi-squared (e.g. the truth-through-A
+        noise floor). Default ``None``.
+    title : str or None, optional
+        Figure suptitle.
+
+    Returns
+    -------
+    None
+        Writes the figure to ``path``.
+    """
+    ep = np.arange(1, len(history["total"]) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    axes[0].plot(ep, history["total"], lw=1)
+    axes[0].set_yscale("log")
+    axes[0].set_title("total loss")
+    axes[0].set_xlabel("epoch")
+
+    for k in history["chi2"]:
+        (line,) = axes[1].plot(ep, history["chi2"][k], lw=1, label=f"{k}")
+        if history.get("train_chi2", {}).get(k):
+            axes[1].plot(
+                ep, history["train_chi2"][k], "--", color=line.get_color(), lw=0.8, alpha=0.4
+            )
+    axes[1].axhline(1.0, color="k", ls=":", lw=0.8)
+    if floor is not None:
+        axes[1].axhline(floor, color="r", ls=":", lw=0.9, label=f"floor {floor:.2f}")
+    axes[1].set_yscale("log")
+    axes[1].set_title("chi2 (solid=true, dashed=train)")
+    axes[1].set_xlabel("epoch")
+    axes[1].legend(fontsize=7, ncol=2)
+
+    if history.get("grad_norm"):
+        axes[2].plot(ep, history["grad_norm"], lw=1, color="tab:purple")
+        axes[2].set_yscale("log")
+        axes[2].set_title("gradient norm")
+        axes[2].set_xlabel("epoch")
+
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {path}")
