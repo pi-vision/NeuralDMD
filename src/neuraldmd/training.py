@@ -170,6 +170,37 @@ def _zero_intensity_update(updates):
     return eqx.tree_at(lambda u: u.intensity, updates, zeroed)
 
 
+def _scale_pol_update(updates, factor):
+    """Scale the polarization sub-models' updates by ``factor`` in ``[0, 1]``.
+
+    A soft learning-rate warmup/freeze for the fractional-pol fields (``frac``,
+    ``cos2xi``, ``sin2xi``, and ``circ`` when present) while Stokes I converges:
+    ``factor=0`` freezes polarization, ``factor=1`` trains it at the full rate.
+
+    Parameters
+    ----------
+    updates : PolarizedNeuralDMD
+        Filtered optimizer-update pytree (same structure as the model params).
+    factor : float or jax.Array
+        Multiplicative scale applied to every polarization-field leaf.
+
+    Returns
+    -------
+    PolarizedNeuralDMD
+        ``updates`` with the polarization sub-model leaves scaled by ``factor``.
+    """
+
+    def scaled(sub):
+        return jax.tree_util.tree_map(lambda x: x * factor, sub)
+
+    updates = eqx.tree_at(lambda u: u.frac, updates, scaled(updates.frac))
+    updates = eqx.tree_at(lambda u: u.cos2xi, updates, scaled(updates.cos2xi))
+    updates = eqx.tree_at(lambda u: u.sin2xi, updates, scaled(updates.sin2xi))
+    if updates.circ is not None:
+        updates = eqx.tree_at(lambda u: u.circ, updates, scaled(updates.circ))
+    return updates
+
+
 @eqx.filter_jit
 def polarized_train_step(
     model,
@@ -185,6 +216,7 @@ def polarized_train_step(
     frame_min,
     *,
     freeze_intensity: bool = False,
+    pol_scale=1.0,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
@@ -194,10 +226,13 @@ def polarized_train_step(
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
-    Differentiates the loss with respect to the whole model pytree. When
-    ``freeze_intensity`` is set, the Stokes-I (``intensity``) sub-model's update
-    is zeroed (held fixed) -- the hierarchical study mode (fit polarization on a
-    frozen I). All keyword-only arguments are static under ``eqx.filter_jit``.
+    Differentiates the loss with respect to the whole model pytree. The
+    polarization-field updates are scaled by ``pol_scale`` (a soft LR
+    warmup/freeze) and, when ``freeze_intensity`` is set, the Stokes-I
+    (``intensity``) sub-model's update is zeroed (held fixed) -- the hierarchical
+    study mode (fit polarization on a frozen I). Pass ``pol_scale`` as a JAX
+    scalar so the ramp does not retrigger ``eqx.filter_jit``; the other
+    keyword-only arguments are static.
 
     Returns
     -------
@@ -227,6 +262,7 @@ def polarized_train_step(
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
     updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    updates = _scale_pol_update(updates, pol_scale)  # soft pol LR warmup/freeze
     if freeze_intensity:
         updates = _zero_intensity_update(updates)
     model = eqx.apply_updates(model, updates)
@@ -244,6 +280,7 @@ def polarized_train_epoch(
     frame_min,
     *,
     freeze_intensity: bool = False,
+    pol_scale=1.0,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
@@ -284,6 +321,7 @@ def polarized_train_epoch(
             frame_max,
             frame_min,
             freeze_intensity=freeze_intensity,
+            pol_scale=pol_scale,
             basis=basis,
             products=products,
             neg_weight=neg_weight,
@@ -313,6 +351,8 @@ def train_polarized_model(
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     freeze_intensity: bool = False,
+    pol_warmup_epochs: int = 0,
+    freeze_i_after: int | None = None,
     initial_lr: float = 3e-4,
     weight_decay: float = 1e-4,
     optimizer_name: str = "adamw",
@@ -335,7 +375,12 @@ def train_polarized_model(
     for ``early_stop_epochs`` consecutive epochs (``None`` disables). Use a
     threshold below 1 when systematic noise inflates sigma -- the truth then sits
     at chi^2 < 1, so stopping at 1 leaves the images under-sharpened. The best
-    (lowest-loss) model is checkpointed.
+    (lowest worst-product chi^2) model is checkpointed and returned.
+
+    ``pol_warmup_epochs`` linearly ramps the polarization learning rate from 0 to
+    full over the first epochs so Stokes I converges before polarization is fit;
+    ``freeze_i_after`` additionally hard-freezes Stokes I from that epoch onward
+    (fit polarization on a fixed I, as in a staged reconstruction).
 
     Returns
     -------
@@ -362,6 +407,14 @@ def train_polarized_model(
         for epoch in range(num_epochs):
             epoch_data = loader.get_epoch_data(epoch)
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
+            # pol-LR curriculum: ramp polarization updates 0 -> 1 over the warmup
+            # so Stokes I converges first, then fit polarization at full rate
+            pol_scale = jnp.asarray(
+                min(1.0, (epoch + 1) / pol_warmup_epochs) if pol_warmup_epochs > 0 else 1.0,
+                dtype=jnp.float32,
+            )
+            # optional hard freeze of the (by now converged) I during the pol tail
+            freeze_i = freeze_intensity or (freeze_i_after is not None and epoch >= freeze_i_after)
             model, opt_state, loss, chi2 = polarized_train_epoch(
                 model,
                 opt_state,
@@ -370,7 +423,8 @@ def train_polarized_model(
                 epoch_key,
                 frame_max,
                 frame_min,
-                freeze_intensity=freeze_intensity,
+                freeze_intensity=freeze_i,
+                pol_scale=pol_scale,
                 basis=basis,
                 products=products,
                 neg_weight=neg_weight,

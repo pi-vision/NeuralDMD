@@ -76,6 +76,7 @@ class PolarizedNeuralDMD(eqx.Module):
         key: jax.Array,
         outshift: float = 2.0,
         scaling_ml: float = 1.0,
+        r_pol: int | None = None,
         **model_kwargs,
     ):
         """Build the I field and the fractional-pol fields from independent split keys.
@@ -85,13 +86,19 @@ class PolarizedNeuralDMD(eqx.Module):
         stokes : tuple of str or StokesConfig
             Must contain I; Q/U enable linear pol, V enables circular pol.
         r : int
-            Complex DMD modes per field.
+            Complex DMD modes for the Stokes-I field.
         key : jax.Array
             PRNG key (split per field).
         outshift : float
             Sigmoid bias for ``m_l``/``m_c`` -> unpolarized initialization.
         scaling_ml : float
             Cap on the linear polarization fraction (``<= 1``).
+        r_pol : int or None
+            Complex DMD modes for the polarization fields (``m_l``, EVPA, ``m_c``).
+            Defaults to ``r``. Set ``r_pol < r`` to deliberately starve the
+            polarization capacity relative to I -- the linear-pol structure is
+            smoother/lower-order than the total intensity, and fewer modes stop
+            the sparse cross-hand data from being over-fit below the noise floor.
         **model_kwargs
             Forwarded to every :class:`NeuralDMD`.
         """
@@ -99,13 +106,14 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
+        r_pol = r if r_pol is None else int(r_pol)
         want_v = "V" in self.stokes
         keys = jax.random.split(key, 5 if want_v else 4)
         self.intensity = NeuralDMD(r=r, key=keys[0], **model_kwargs)
-        self.frac = NeuralDMD(r=r, key=keys[1], **model_kwargs)
-        self.cos2xi = NeuralDMD(r=r, key=keys[2], **model_kwargs)
-        self.sin2xi = NeuralDMD(r=r, key=keys[3], **model_kwargs)
-        self.circ = NeuralDMD(r=r, key=keys[4], **model_kwargs) if want_v else None
+        self.frac = NeuralDMD(r=r_pol, key=keys[1], **model_kwargs)
+        self.cos2xi = NeuralDMD(r=r_pol, key=keys[2], **model_kwargs)
+        self.sin2xi = NeuralDMD(r=r_pol, key=keys[3], **model_kwargs)
+        self.circ = NeuralDMD(r=r_pol, key=keys[4], **model_kwargs) if want_v else None
 
     def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
         """Physical per-Stokes image cubes and per-network modes (loss/eval interface).

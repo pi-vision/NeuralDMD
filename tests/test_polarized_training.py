@@ -172,3 +172,44 @@ def test_circular_basis_training_reduces_loss():
         if step == 0:
             first = float(loss)
     assert float(loss) < first
+
+
+def _max_leaf_change(a, b):
+    """Largest absolute change across all array leaves of two model subtrees."""
+    la = jax.tree_util.tree_leaves(eqx.filter(a, eqx.is_array))
+    lb = jax.tree_util.tree_leaves(eqx.filter(b, eqx.is_array))
+    return max(float(jnp.abs(x - y).max()) for x, y in zip(la, lb, strict=True))
+
+
+def test_r_pol_starves_polarization_capacity():
+    """``r_pol`` gives the polarization fields fewer DMD modes than Stokes I."""
+    model = PolarizedNeuralDMD(STOKES, r=8, r_pol=3, key=jax.random.PRNGKey(0), **MODEL_KW)
+    assert model.intensity.r == 8
+    assert model.frac.r == model.cos2xi.r == model.sin2xi.r == 3
+
+
+def test_pol_scale_zero_freezes_polarization():
+    """``pol_scale=0`` holds the polarization fields fixed while Stokes I updates."""
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(0), **MODEL_KW)
+    xy, a, ti, tgt, sig, msk, fmax, fmin = _fittable_batch(seed=1)
+    opt = make_polarized_optimizer(model, initial_lr=3e-3)
+    st = opt.init(eqx.filter(model, eqx.is_array))
+    new, *_ = polarized_train_step(
+        model, st, xy, tgt, sig, msk, a, ti, opt, fmax, fmin, pol_scale=jnp.asarray(0.0), **_NOPEN
+    )
+    assert _max_leaf_change(model.frac, new.frac) == 0.0
+    assert _max_leaf_change(model.cos2xi, new.cos2xi) == 0.0
+    assert _max_leaf_change(model.intensity, new.intensity) > 0.0
+
+
+def test_freeze_intensity_freezes_i_not_pol():
+    """``freeze_intensity`` holds Stokes I fixed while the polarization updates."""
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(0), **MODEL_KW)
+    xy, a, ti, tgt, sig, msk, fmax, fmin = _fittable_batch(seed=1)
+    opt = make_polarized_optimizer(model, initial_lr=3e-3)
+    st = opt.init(eqx.filter(model, eqx.is_array))
+    new, *_ = polarized_train_step(
+        model, st, xy, tgt, sig, msk, a, ti, opt, fmax, fmin, freeze_intensity=True, **_NOPEN
+    )
+    assert _max_leaf_change(model.intensity, new.intensity) == 0.0
+    assert _max_leaf_change(model.frac, new.frac) > 0.0

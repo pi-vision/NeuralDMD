@@ -51,6 +51,25 @@ def parse_args():
     # fractional-pol controls
     ap.add_argument("--scaling-ml", type=float, default=1.0, help="Cap on linear pol fraction")
     ap.add_argument("--outshift", type=float, default=2.0, help="m_l sigmoid bias (small init)")
+    # polarization regularization / curriculum (anti-overfit levers)
+    ap.add_argument(
+        "--r-pol",
+        type=int,
+        default=None,
+        help="DMD modes for the pol fields (default = --r; use < r to starve capacity)",
+    )
+    ap.add_argument(
+        "--pol-warmup-epochs",
+        type=int,
+        default=0,
+        help="ramp the pol learning rate 0->1 over N epochs (I converges first)",
+    )
+    ap.add_argument(
+        "--freeze-i-after",
+        type=int,
+        default=None,
+        help="hard-freeze Stokes I from this epoch on (fit pol on a fixed I)",
+    )
     # per-product early stop: stop once ALL products <= this; <1 so images sharpen
     ap.add_argument("--early-stop-chi2", type=float, default=0.8)
     return ap.parse_args()
@@ -108,6 +127,7 @@ def main():
         key=jax.random.PRNGKey(args.seed),
         outshift=args.outshift,
         scaling_ml=args.scaling_ml,
+        r_pol=args.r_pol,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
     )
@@ -138,6 +158,8 @@ def main():
         optimizer_name=args.optimizer,
         lr_decay_rate=args.lr_decay_rate,
         lr_decay_steps=args.lr_decay_steps,
+        pol_warmup_epochs=args.pol_warmup_epochs,
+        freeze_i_after=args.freeze_i_after,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,
         **extra,
