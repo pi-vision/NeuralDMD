@@ -225,3 +225,7 @@ eht2017/data/
 
 # Cluster-local SLURM scripts (never pushed to the shared repo)
 slurm/
+tutorial/pixel/data/
+tutorial/pixel/models/
+tutorial/pixel/checkpoints/
+tutorial/pixel/plots/
