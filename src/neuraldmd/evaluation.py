@@ -1,6 +1,7 @@
 """Evaluation and visualization helpers for the Fourier tutorial."""
 
 import os
+import warnings
 
 import h5py
 import imageio.v3 as iio
@@ -199,7 +200,18 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
 
     T = As.shape[0]
     I = np.asarray(intensities)
-    assert I.shape[1] == T, f"expected {T} frames, got {I.shape[1]}"
+    # The observation scheduler can drop a trailing scan, so a full-movie
+    # reconstruction may carry one more frame than there are observed frames
+    # (DMDDataLoader applies the same trim). Match by using the first T frames.
+    if I.shape[1] < T:
+        raise ValueError(f"reconstruction has {I.shape[1]} frames, fewer than {T} observed")
+    if I.shape[1] > T:
+        warnings.warn(
+            f"reconstruction has {I.shape[1]} frames; using the first {T} to match "
+            f"the {T} observed frames.",
+            stacklevel=2,
+        )
+        I = I[:, :T]
 
     chi2_vis_num = chi2_amp_num = cp_num = 0.0
     for t0 in range(0, T, chunk):

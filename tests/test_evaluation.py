@@ -7,6 +7,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from _impl import (
     NeuralDMD,
     calc_psnr,
@@ -47,6 +48,27 @@ def test_evaluate_chi2_truth_is_self_consistent(tiny_obs):
     out = evaluate_chi2(I.astype(np.float32), tiny_obs.data_dir)
     assert out["chi2_vis"] < 1e-3
     assert out["chi2_amp"] < 1e-3
+
+
+def test_evaluate_chi2_trims_extra_frame(tiny_obs):
+    # a full-movie reconstruction (T_obs + 1 frames) must trim to the observed
+    # count with a warning, and give the same chi2 as the trimmed input.
+    P, T = tiny_obs.P, tiny_obs.T_obs
+    assert tiny_obs.num_frames == T + 1  # fixture exercises the mismatch
+    I_full = tiny_obs.movie.reshape(tiny_obs.num_frames, P).T.astype(np.float32)  # (P, T+1)
+    I_trim = I_full[:, :T]
+
+    with pytest.warns(UserWarning, match="using the first"):
+        out_full = evaluate_chi2(I_full, tiny_obs.data_dir)
+    out_trim = evaluate_chi2(I_trim, tiny_obs.data_dir)
+    for k in ("chi2_vis", "chi2_amp", "chi2_cp"):
+        np.testing.assert_allclose(out_full[k], out_trim[k], rtol=1e-6)
+
+
+def test_evaluate_chi2_too_few_frames_raises(tiny_obs):
+    I_short = tiny_obs.movie[: tiny_obs.T_obs - 1].reshape(tiny_obs.T_obs - 1, tiny_obs.P).T
+    with pytest.raises(ValueError, match="fewer than"):
+        evaluate_chi2(I_short.astype(np.float32), tiny_obs.data_dir)
 
 
 def test_evaluate_chi2_matches_loss_fn(tiny_obs):
