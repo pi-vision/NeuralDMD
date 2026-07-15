@@ -320,8 +320,10 @@ def train_polarized_model(
     :class:`~neuraldmd.data.loader.PolarizedDMDDataLoader`.
 
     Objective is :func:`polarized_loss_fn` in the chosen ``basis``. Early stopping
-    triggers when the mean per-key chi-squared stays at or below ``early_stop_chi2``
-    for ``early_stop_epochs`` consecutive epochs (``None`` disables). The best
+    triggers when EVERY per-key chi-squared stays at or below ``early_stop_chi2``
+    for ``early_stop_epochs`` consecutive epochs (``None`` disables). Use a
+    threshold below 1 when systematic noise inflates sigma -- the truth then sits
+    at chi^2 < 1, so stopping at 1 leaves the images under-sharpened. The best
     (lowest-loss) model is checkpointed.
 
     Returns
@@ -355,6 +357,7 @@ def train_polarized_model(
             for k in loader.keys:
                 history["chi2"][k].append(float(chi2[k]))
             mean_chi2 = float(sum(chi2.values()) / len(chi2))
+            max_chi2 = float(max(chi2.values()))
 
             pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{mean_chi2:.3f}")
             pbar.update(1)
@@ -370,10 +373,12 @@ def train_polarized_model(
                 eqx.tree_serialise_leaves(ckpt_path, model)
 
             if early_stop_chi2 is not None:
-                at_noise = at_noise + 1 if mean_chi2 <= early_stop_chi2 else 0
+                # per-product: every key must be at/below threshold (not the mean),
+                # so I keeps sharpening even after the pol products reach the floor
+                at_noise = at_noise + 1 if max_chi2 <= early_stop_chi2 else 0
                 if at_noise >= early_stop_epochs:
                     print(
-                        f"Early stop at epoch {epoch + 1}: mean chi2 <= {early_stop_chi2}",
+                        f"Early stop at epoch {epoch + 1}: all chi2 <= {early_stop_chi2}",
                         flush=True,
                     )
                     break

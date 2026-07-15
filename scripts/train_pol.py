@@ -45,6 +45,8 @@ def parse_args():
     # fractional-pol controls
     ap.add_argument("--scaling-ml", type=float, default=1.0, help="Cap on linear pol fraction")
     ap.add_argument("--outshift", type=float, default=2.0, help="m_l sigmoid bias (small init)")
+    # per-product early stop: stop once ALL products <= this; <1 so images sharpen
+    ap.add_argument("--early-stop-chi2", type=float, default=0.8)
     return ap.parse_args()
 
 
@@ -108,7 +110,7 @@ def main():
         models_dir=str(out / "models"), frame_max=frame_max, frame_min=frame_min,
         basis=args.basis, initial_lr=args.lr, optimizer_name=args.optimizer,
         lr_decay_rate=args.lr_decay_rate, lr_decay_steps=args.lr_decay_steps,
-        early_stop_chi2=1.0, print_every=200, **extra,
+        early_stop_chi2=args.early_stop_chi2, print_every=200, **extra,
     )
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
