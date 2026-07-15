@@ -1,0 +1,78 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [polarization, "feat/**"]
+  schedule:
+    - cron: "0 6 * * 1"  # weekly (ehtim drift)
+  workflow_dispatch:
+
+env:
+  MPLBACKEND: Agg  # headless matplotlib
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: format --check
+
+  test-core:
+    # fast tier: numpy-only tests against the current implementation, latest jax
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[test]"
+      - run: pytest -m "not ehtim and not slow and not gpu" --cov=neuraldmd
+
+  test-pinned:
+    # cluster-parity fallback stack (jax 0.6.2 / numpy 1.26.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install "numpy==1.26.4" "jax==0.6.2" "jaxlib==0.6.2" -e ".[test]"
+      - run: pytest -m "not ehtim and not slow and not gpu"
+
+  test-slow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[test]"
+      - run: pytest -m "slow and not ehtim and not gpu"
+
+  test-ehtim:
+    # heavy interferometry stack; manual/weekly only
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          pip install -e ".[test]"
+          pip install "ehtim @ git+https://github.com/achael/eht-imaging@dev" finufft
+      - run: pytest -m ehtim
