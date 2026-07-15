@@ -339,7 +339,9 @@ def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     return float(np.degrees(np.median(np.abs(diff))))
 
 
-def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vmax=None, skip=None):
+def _evpa_quiver(
+    ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vmax=None, skip=None, quiver=True
+):
     """Overlay EVPA ticks on a Stokes-I background (EHT dynamics-plot convention).
 
     Ticks point along ``(-sin chi, cos chi)`` with ``chi = 0.5*angle(Q + iU)``,
@@ -364,11 +366,15 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vm
         residual maps).
     skip : int or None, optional
         Draw one tick every ``skip`` pixels (default ``~W/20``).
+    quiver : bool, optional
+        If ``False``, draw only the intensity background and no EVPA ticks
+        (useful where the polarization is meaningless, e.g. a dynamic residual).
+        Default ``True``.
 
     Returns
     -------
-    tuple of (matplotlib.quiver.Quiver, matplotlib.image.AxesImage)
-        The tick and background-image artists.
+    tuple of (matplotlib.quiver.Quiver or None, matplotlib.image.AxesImage)
+        The tick (``None`` when ``quiver`` is ``False``) and background artists.
     """
     from matplotlib.colors import Normalize
 
@@ -385,6 +391,10 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vm
         extent=lims,
         interpolation="bicubic",
     )
+    if not quiver:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return None, bg
 
     px = fov_uas / nx
     yy, xx = np.mgrid[slice(-fov_uas / 2, fov_uas / 2, px), slice(-fov_uas / 2, fov_uas / 2, px)]
@@ -503,15 +513,17 @@ def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
     print(f"Saved {path}")
 
 
-def make_polarized_comparison_gif(recon, truth, path, fps=10, fov_uas=200.0, times=None):
+def make_polarized_comparison_gif(
+    recon, truth, path, fps=10, fov_uas=200.0, times=None, dynamic_quiver=False
+):
     """Animate truth vs reconstruction in the EHT dynamics-plot layout.
 
     Two rows (truth, reconstruction) by three columns per frame:
 
     * **Total** -- the per-frame Stokes I with EVPA ticks,
-    * **Dynamic** -- I minus its time mean on a symmetric diverging scale with
-      the dynamic-pol EVPA ticks, and a contour of the truth dynamic emission
-      over the reconstruction panel,
+    * **Dynamic** -- I minus its time mean on a symmetric diverging scale (EVPA
+      ticks only if ``dynamic_quiver``), with a contour of the truth dynamic
+      emission over the reconstruction panel,
     * **Static** -- the time-mean I with the time-mean-pol EVPA ticks.
 
     All intensity panels share color scales across rows and frames so truth and
@@ -529,6 +541,9 @@ def make_polarized_comparison_gif(recon, truth, path, fps=10, fov_uas=200.0, tim
         Field of view [micro-arcsec]. Default 200.
     times : numpy.ndarray or None, optional
         ``(T,)`` frame times for the title (normalized or hours).
+    dynamic_quiver : bool, optional
+        Draw EVPA ticks on the Dynamic column too. Off by default -- for a model
+        whose polarization is essentially static, the residual EVPA is noise.
 
     Returns
     -------
@@ -562,6 +577,7 @@ def make_polarized_comparison_gif(recon, truth, path, fps=10, fov_uas=200.0, tim
                 cmap_bg="coolwarm",
                 vmin=-max_dyn,
                 vmax=max_dyn,
+                quiver=dynamic_quiver,
             )
             _evpa_quiver(axes[i, 2], static["I"], static["Q"], static["U"], fov_uas, vmax=vmax_i)
             axes[i, 0].set_ylabel(label, fontsize=14)

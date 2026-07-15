@@ -123,6 +123,11 @@ def parse_args():
     ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
     # evaluation: also report metrics after restoring both cubes to this beam
     ap.add_argument("--blur-uas", type=float, default=15.0, help="metric beam FWHM [uas]")
+    ap.add_argument(
+        "--dynamic-quiver",
+        action="store_true",
+        help="draw EVPA ticks on the comparison GIF's Dynamic panel (off by default)",
+    )
     # per-product early stop: stop once ALL products <= this; <1 so images sharpen
     ap.add_argument("--early-stop-chi2", type=float, default=0.8)
     return ap.parse_args()
@@ -354,7 +359,12 @@ def main():
     # animated GIFs: truth-vs-recon total/dynamic/static comparison + singles
     try:
         ev.make_polarized_comparison_gif(
-            recon, truth_cubes, str(out / "pol_lp.gif"), fov_uas=args.fov_uas, times=truth["times"]
+            recon,
+            truth_cubes,
+            str(out / "pol_lp.gif"),
+            fov_uas=args.fov_uas,
+            times=truth["times"],
+            dynamic_quiver=args.dynamic_quiver,
         )
         ev.make_polarized_gif(recon, str(out / "recon_pol.gif"), fov_uas=args.fov_uas)
         ev.make_polarized_gif(truth_cubes, str(out / "truth_pol.gif"), fov_uas=args.fov_uas)
