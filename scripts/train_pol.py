@@ -41,6 +41,14 @@ def parse_args():
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reuse-data", action="store_true", help="Reuse an existing data/ obs_dir")
+    # external observation mode: fit a provided uvfits (e.g. the on-sky synthetic
+    # mring+hsCW) instead of self-generating one; the ground truth is rebuilt on
+    # the observation's own clock for evaluation
+    ap.add_argument("--uvfits", default=None, help="external uvfits to fit (skips generation)")
+    ap.add_argument("--syserr", type=float, default=0.0, help="fractional syserr added to sigma")
+    ap.add_argument(
+        "--truth-frames", type=int, default=200, help="truth-movie frames (uvfits mode)"
+    )
     # Stokes-I disk-template pretraining (image prior)
     ap.add_argument("--no-pretrain", action="store_true", help="Skip the Stokes-I pretrain")
     ap.add_argument("--pretrain-steps", type=int, default=2000)
@@ -140,6 +148,34 @@ def main():
     if args.reuse_data and (data_dir / "manifest.json").exists():
         print(f"Reusing dataset at {data_dir}", flush=True)
         op = ObsProducts.from_obs_dir(data_dir)
+    elif args.uvfits:
+        from neuraldmd.data.generation import save_truth_npz
+        from neuraldmd.data.movies import make_mring_hs_pol_movie
+        from neuraldmd.data.observations import load_uvfits_to_products
+
+        print(f"Loading external uvfits {args.uvfits} ...", flush=True)
+        op = load_uvfits_to_products(
+            args.uvfits,
+            npix=args.npix,
+            fov_uas=args.fov_uas,
+            stokes=stokes,
+            basis=args.basis,
+            syserr=args.syserr,
+        )
+        op.to_obs_dir(data_dir)
+        # rebuild the canonical truth on the observation's own clock: uniform
+        # frames spanning first->last scan; training uses the actual scan times
+        t0, t1 = op.time_anchors_hr
+        print(f"Rebuilding truth movie on {t0:.3f}..{t1:.3f} UT ...", flush=True)
+        movie = make_mring_hs_pol_movie(
+            npix=args.npix,
+            fov_uas=args.fov_uas,
+            num_frames=args.truth_frames,
+            tstart_hr=t0,
+            tstop_hr=t1,
+            linpol_frac=args.frac_pol,
+        )
+        save_truth_npz(movie, data_dir, args.npix, args.fov_uas)
     else:
         print("Generating polarized dataset ...", flush=True)
         op = generate_polarized_dataset(
@@ -272,6 +308,35 @@ def main():
     ev.plot_polarized_summary(
         recon, truth_cubes, str(out / "pol_summary.png"), fov_uas=args.fov_uas
     )
+
+    # spatial DMD modes + eigenvalues of the I and pol-fraction fields
+    try:
+        import matplotlib.pyplot as plt
+
+        xy_grid = ev.pixel_grid_coords(args.npix, args.npix)  # jax accepts numpy
+        for name, sub in (("I", model.intensity), ("mfrac", model.frac)):
+            w0, w, om, b0, b = sub(xy_grid)
+            w_s, om_s, _ = ev.sort_modes_by_lambda(w, om, b)
+            ev.plot_modes(
+                np.asarray(w_s),
+                args.npix,
+                args.npix,
+                str(out / f"modes_{name}_abs.png"),
+                title=f"{name} mode",
+                part="abs",
+            )
+            ev.plot_modes(
+                np.asarray(w_s),
+                args.npix,
+                args.npix,
+                str(out / f"modes_{name}_real.png"),
+                title=f"{name} mode",
+                part="real",
+            )
+            ev.plot_unit_circle(np.asarray(om_s), str(out / f"omega_{name}.png"))
+        plt.close("all")
+    except Exception as exc:
+        print(f"[warn] mode plots failed: {exc}", flush=True)
 
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:

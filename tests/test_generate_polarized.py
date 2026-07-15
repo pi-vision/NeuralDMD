@@ -50,3 +50,58 @@ def test_generate_circular_dataset(tmp_path):
     rr = op.targets["RR"][op.masks["RR"] > 0]
     rl = op.targets["RL"][op.masks["RL"] > 0]
     assert np.mean(np.abs(rr)) > np.mean(np.abs(rl))
+
+
+def test_dataset_times_and_truth_noise_floor(tmp_path):
+    """The generated dataset stores movie-anchored frame times (a moving source
+    trained on frame-index times learns a warped clock), and the ground truth
+    pushed through the saved operator reaches the noise floor on EVERY product
+    -- the single end-to-end guard for A, orientation, sigmas, masks, and the
+    time axis at once."""
+    out = tmp_path / "ds"
+    op = generate_polarized_dataset(
+        out,
+        npix=24,
+        fov_uas=200.0,
+        num_frames=12,
+        tstart_hr=9.0,
+        tstop_hr=15.0,
+        fractional_noise=0.04,
+        basis="circular",
+        seed=3,
+    )
+    assert op.times is not None
+    # movie-anchored: strictly increasing, inside [0, 1], NOT the index grid
+    assert np.all(np.diff(op.times) > 0)
+    assert op.times.min() >= 0.0 and op.times.max() <= 1.0
+    assert not np.allclose(op.times, np.linspace(0, 1, len(op.times)))
+
+    tr = np.load(out / "truth_pol.npz")
+    t_truth = tr["times"]
+
+    def cube_at(c, tq):
+        idx = np.interp(tq, t_truth, np.arange(len(t_truth)))
+        lo = np.clip(np.floor(idx).astype(int), 0, len(t_truth) - 1)
+        hi = np.clip(lo + 1, 0, len(t_truth) - 1)
+        w = (idx - lo)[:, None, None]
+        return (1 - w) * c[lo] + w * c[hi]
+
+    T = op.A.shape[0]
+    cubes = {s: cube_at(tr[s], op.times).reshape(T, -1) for s in ("I", "Q", "U")}
+    vis = {
+        s: np.einsum("tvp,tp->tv", op.A, cubes[s].astype(np.complex128)) for s in ("I", "Q", "U")
+    }
+    model = {
+        "RR": vis["I"],
+        "LL": vis["I"],
+        "RL": vis["Q"] + 1j * vis["U"],
+        "LR": vis["Q"] - 1j * vis["U"],
+    }
+    for p in ("RR", "LL", "RL", "LR"):
+        m = op.masks[p] > 0
+        chi2 = float(
+            (np.abs(model[p] - op.targets[p])[m] ** 2 / op.sigmas[p][m] ** 2).sum() / (2 * m.sum())
+        )
+        # thermal-only data against 4%-syserr-inflated sigma: floor well below 1;
+        # any time-axis / convention regression blows this up by orders of magnitude
+        assert chi2 < 1.0, f"truth chi2_{p} = {chi2:.3f} (noise floor regression)"

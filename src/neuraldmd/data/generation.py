@@ -726,33 +726,66 @@ def generate_polarized_dataset(
     obs.save_uvfits(str(uvfits_path))
 
     op = load_uvfits_to_products(
-        uvfits_path, npix=npix, fov_uas=fov_uas, stokes=tuple(stokes), basis=basis
+        uvfits_path,
+        npix=npix,
+        fov_uas=fov_uas,
+        stokes=tuple(stokes),
+        basis=basis,
+        # anchor the training clock on the movie window so the model's
+        # normalized times and the truth cubes' times are the same axis
+        time_anchors=(tstart_hr, tstop_hr),
     )
     op.to_obs_dir(out_dir)
 
     if save_truth:
-        # ground-truth Stokes cubes (T, npix, npix) from the movie frames, with
-        # normalized [0, 1] frame times matching the loader default.
-        ims = movie.im_list()
-
-        def _cube(attr):
-            return np.stack(
-                [np.asarray(getattr(im, attr)).reshape(npix, npix) for im in ims]
-            ).astype(np.float32)
-
-        mtimes = np.array([float(im.time) for im in ims])
-        span = float(mtimes.max() - mtimes.min())
-        tnorm = (mtimes - mtimes.min()) / (span if span > 0 else 1.0)
-        np.savez(
-            out_dir / "truth_pol.npz",
-            I=_cube("imvec"),
-            Q=_cube("qvec"),
-            U=_cube("uvec"),
-            times=tnorm.astype(np.float32),
-            npix=npix,
-            fov_uas=fov_uas,
-        )
+        save_truth_npz(movie, out_dir, npix, fov_uas)
     return op
+
+
+def save_truth_npz(movie, out_dir, npix: int, fov_uas: float) -> None:
+    """Save an ehtim movie's Stokes cubes as ``truth_pol.npz`` for evaluation.
+
+    Writes ``I``/``Q``/``U`` cubes of shape ``(T, npix, npix)`` plus frame times
+    normalized to [0, 1] over the movie's own span -- the same normalization the
+    training clock uses when the dataset is generated with matching
+    ``time_anchors``.
+
+    Parameters
+    ----------
+    movie : ehtim.movie.Movie
+        Ground-truth movie (frames carry ``imvec``/``qvec``/``uvec``).
+    out_dir : str or pathlib.Path
+        Destination directory for ``truth_pol.npz``.
+    npix : int
+        Image grid side length of the movie frames.
+    fov_uas : float
+        Field of view [micro-arcsec] recorded alongside the cubes.
+
+    Returns
+    -------
+    None
+        Writes ``out_dir / "truth_pol.npz"``.
+    """
+    out_dir = Path(out_dir)
+    ims = movie.im_list()
+
+    def _cube(attr):
+        return np.stack([np.asarray(getattr(im, attr)).reshape(npix, npix) for im in ims]).astype(
+            np.float32
+        )
+
+    mtimes = np.array([float(im.time) for im in ims])
+    span = float(mtimes.max() - mtimes.min())
+    tnorm = (mtimes - mtimes.min()) / (span if span > 0 else 1.0)
+    np.savez(
+        out_dir / "truth_pol.npz",
+        I=_cube("imvec"),
+        Q=_cube("qvec"),
+        U=_cube("uvec"),
+        times=tnorm.astype(np.float32),
+        npix=npix,
+        fov_uas=fov_uas,
+    )
 
 
 if __name__ == "__main__":

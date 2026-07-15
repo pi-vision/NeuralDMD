@@ -81,10 +81,15 @@ class PolarizedDMDDataLoader:
 
         self.num_frames = n_t
         self.pixel_coords = _pixel_grid(npix, fov_x, fov_y)
+        if times is None:
+            # scans are generally not uniform in time: prefer the dataset's own
+            # frame times over the frame-index fallback (index times warp the
+            # model's clock relative to the ground-truth movie)
+            times = obs_products.times
         if times is not None:
             self.times = np.asarray(times, dtype=np.float32)
         else:
-            # normalized frame times in [0, 1] (matches the model's t_scale usage)
+            # normalized [0, 1] frame-index times (legacy datasets only)
             self.times = np.linspace(0.0, 1.0, n_t, dtype=np.float32)
         self.batch_size = int(batch_size)
         self.epochs = int(epochs)

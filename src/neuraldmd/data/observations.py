@@ -46,6 +46,13 @@ class ObsProducts:
         ``(T, M, 2)`` integer station ids per baseline (-1 for padded slots).
     stations : tuple of str or None
         Station names indexed by the ids in ``bl_station_ids``.
+    times : numpy.ndarray or None
+        ``(T,)`` normalized frame times in [0, 1]. Scans are generally NOT
+        uniform in time, and even for uniform scans the observed window differs
+        from the movie window -- training on frame *indices* instead of these
+        times warps the model's clock relative to the ground truth (for an
+        orbiting hot spot, tens of degrees of orbital phase). ``None`` only for
+        legacy datasets.
     """
 
     A: np.ndarray  # (T, M, P) complex64 image->visibility operator
@@ -58,6 +65,8 @@ class ObsProducts:
     # the Phase-6 gains / Phase-7 RIME calibration). None for hand-built datasets.
     bl_station_ids: np.ndarray | None = None  # (T, M, 2) int; padded rows are -1
     stations: tuple[str, ...] | None = None  # station names, indexed by id
+    times: np.ndarray | None = None  # (T,) normalized frame times in [0, 1]
+    time_anchors_hr: tuple[float, float] | None = None  # (t0, t1) [hr] of times=0/1
 
     def __post_init__(self):
         """Coerce tuple fields and validate the arrays on construction."""
@@ -89,6 +98,8 @@ class ObsProducts:
                     raise ValueError(f"{name}[{s!r}] shape {d[s].shape} != {(T, M)}")
         if self.bl_station_ids is not None and self.bl_station_ids.shape != (T, M, 2):
             raise ValueError(f"bl_station_ids shape {self.bl_station_ids.shape} != {(T, M, 2)}")
+        if self.times is not None and self.times.shape != (T,):
+            raise ValueError(f"times shape {self.times.shape} != {(T,)}")
 
     @property
     def n_frames(self) -> int:
@@ -133,6 +144,9 @@ class ObsProducts:
             bl_path = obs_dir / "bl_station_ids.npy"
             bl = np.load(bl_path) if bl_path.exists() else None
             stations = meta.get("stations")
+            times_path = obs_dir / "times.npy"
+            times = np.load(times_path) if times_path.exists() else None
+            anchors = meta.get("time_anchors_hr")
             return cls(
                 A,
                 stokes,
@@ -142,6 +156,8 @@ class ObsProducts:
                 version=version,
                 bl_station_ids=bl,
                 stations=tuple(stations) if stations is not None else None,
+                times=times,
+                time_anchors_hr=tuple(anchors) if anchors is not None else None,
             )
 
         # legacy v1: Stokes I only, unsuffixed files
@@ -175,9 +191,13 @@ class ObsProducts:
             np.save(obs_dir / f"masks_{s}.npy", self.masks[s])
         if self.bl_station_ids is not None:
             np.save(obs_dir / "bl_station_ids.npy", self.bl_station_ids)
+        if self.times is not None:
+            np.save(obs_dir / "times.npy", self.times)
         manifest: dict[str, object] = {"version": 2, "stokes": list(self.stokes)}
         if self.stations is not None:
             manifest["stations"] = list(self.stations)
+        if self.time_anchors_hr is not None:
+            manifest["time_anchors_hr"] = list(self.time_anchors_hr)
         (obs_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
@@ -210,6 +230,7 @@ def load_uvfits_to_products(
     syserr: float = 0.0,
     flag_sites: tuple[str, ...] = (),
     t_gather: float | None = None,
+    time_anchors: tuple[float, float] | None = None,
 ) -> ObsProducts:
     """Load a UVFITS file into an :class:`ObsProducts`.
 
@@ -250,6 +271,12 @@ def load_uvfits_to_products(
     t_gather : float or None
         Snapshot length [h] for ``split_obs``; None uses ehtim's default
         (one snapshot per integration/scan).
+    time_anchors : tuple of float or None
+        ``(t0_hr, t1_hr)`` anchors for normalizing the per-frame scan times to
+        [0, 1] as ``(t - t0) / (t1 - t0)``. Pass the ground-truth movie's
+        ``(tstart, tstop)`` for synthetic data so the training time axis and the
+        truth cubes share one clock; ``None`` (default, for real data) anchors
+        on the observation's own first/last scan.
 
     Returns
     -------
@@ -293,11 +320,13 @@ def load_uvfits_to_products(
     # Per-frame extraction (ragged in the visibility axis; padded below).
     A_frames: list[np.ndarray] = []
     bl_frames: list[np.ndarray] = []
+    time_frames: list[float] = []
     t_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
     s_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
     m_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
 
     for f in frames:
+        time_frames.append(float(np.mean(f.data["time"])))  # frame time [hr]
         # Shared operator; chisqdata's row order matches f.data row order (verified).
         _, _, A = chisqdata(f, prior, mask=[], pol="I", dtype="vis")
         A_frames.append(np.asarray(A, dtype=np.complex64))
@@ -335,6 +364,16 @@ def load_uvfits_to_products(
             sigmas[k][i, :m] = s_frames[k][i]
             masks[k][i, :m] = m_frames[k][i]
 
+    # normalized frame times: the model's clock must match the (truth) movie's,
+    # so scans are placed at their actual times, not at uniform frame indices
+    t_hr = np.asarray(time_frames, dtype=np.float64)
+    if time_anchors is not None:
+        t0, t1 = float(time_anchors[0]), float(time_anchors[1])
+    else:
+        t0, t1 = float(t_hr.min()), float(t_hr.max())
+    span = t1 - t0
+    times = ((t_hr - t0) / (span if span > 0 else 1.0)).astype(np.float32)
+
     return ObsProducts(
         A,
         keys,
@@ -343,4 +382,6 @@ def load_uvfits_to_products(
         masks,
         bl_station_ids=bl,
         stations=tuple(str(site) for site in obs.tarr["site"]),
+        times=times,
+        time_anchors_hr=(t0, t1),
     )
