@@ -278,8 +278,11 @@ def main():
     except Exception as exc:
         print(f"[warn] reconstruction hdf5 export failed: {exc}", flush=True)
 
-    # animated GIFs (reconstruction + truth) with EVPA ticks
+    # animated GIFs: truth-vs-recon total/dynamic/static comparison + singles
     try:
+        ev.make_polarized_comparison_gif(
+            recon, truth_cubes, str(out / "pol_lp.gif"), fov_uas=args.fov_uas, times=truth["times"]
+        )
         ev.make_polarized_gif(recon, str(out / "recon_pol.gif"), fov_uas=args.fov_uas)
         ev.make_polarized_gif(truth_cubes, str(out / "truth_pol.gif"), fov_uas=args.fov_uas)
     except Exception as exc:

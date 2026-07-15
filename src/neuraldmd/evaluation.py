@@ -339,26 +339,29 @@ def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     return float(np.degrees(np.median(np.abs(diff))))
 
 
-def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, skip=None):
+def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vmax=None, skip=None):
     """Overlay EVPA ticks on a Stokes-I background (EHT dynamics-plot convention).
 
     Ticks point along ``(-sin chi, cos chi)`` with ``chi = 0.5*angle(Q + iU)``,
     have length proportional to the polarized intensity, and are colored by the
     fractional polarization; the intensity map uses ``afmhot`` with RA increasing
-    to the left. Ticks are masked where I or P is below 10% of its peak.
+    to the left. Ticks are masked where |I| or P is below 10% of its peak.
 
     Parameters
     ----------
     ax : matplotlib.axes.Axes
         Target axes.
     intensity, q, u : numpy.ndarray
-        ``(H, W)`` Stokes I, Q, U maps for a single frame.
+        ``(H, W)`` Stokes I, Q, U maps for a single frame (I may be signed, e.g.
+        a dynamic residual).
     fov_uas : float
         Field of view [micro-arcsec] setting the tick geometry.
     cmap_bg : str, optional
         Background colormap for Stokes I. Default ``"afmhot"``.
-    vmax : float or None, optional
-        Upper limit of the intensity color scale (``None`` autoscales).
+    vmin, vmax : float or None, optional
+        Intensity color-scale limits (``vmin=0`` and autoscaled ``vmax`` by
+        default; pass symmetric limits with a diverging ``cmap_bg`` for
+        residual maps).
     skip : int or None, optional
         Draw one tick every ``skip`` pixels (default ``~W/20``).
 
@@ -377,7 +380,7 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, s
         intensity,
         cmap=cmap_bg,
         origin="upper",
-        vmin=0.0,
+        vmin=vmin,
         vmax=vmax,
         extent=lims,
         interpolation="bicubic",
@@ -492,6 +495,91 @@ def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
                 interpolation="bicubic",
             )
         ax.axis("off")
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
+    print(f"Saved {path}")
+
+
+def make_polarized_comparison_gif(recon, truth, path, fps=10, fov_uas=200.0, times=None):
+    """Animate truth vs reconstruction in the EHT dynamics-plot layout.
+
+    Two rows (truth, reconstruction) by three columns per frame:
+
+    * **Total** -- the per-frame Stokes I with EVPA ticks,
+    * **Dynamic** -- I minus its time mean on a symmetric diverging scale with
+      the dynamic-pol EVPA ticks, and a contour of the truth dynamic emission
+      over the reconstruction panel,
+    * **Static** -- the time-mean I with the time-mean-pol EVPA ticks.
+
+    All intensity panels share color scales across rows and frames so truth and
+    reconstruction are directly comparable.
+
+    Parameters
+    ----------
+    recon, truth : dict of str -> numpy.ndarray
+        ``{"I": (T, H, W), "Q": ..., "U": ...}`` cubes on the same grid/times.
+    path : str
+        Output GIF path.
+    fps : int, optional
+        Frames per second. Default 10.
+    fov_uas : float, optional
+        Field of view [micro-arcsec]. Default 200.
+    times : numpy.ndarray or None, optional
+        ``(T,)`` frame times for the title (normalized or hours).
+
+    Returns
+    -------
+    None
+        Writes the GIF to ``path``.
+    """
+    keys = ("I", "Q", "U")
+    rc = {s: np.asarray(recon[s]) for s in keys}
+    tc = {s: np.asarray(truth[s]) for s in keys}
+    n_t = rc["I"].shape[0]
+    static_t = {s: tc[s].mean(axis=0) for s in keys}
+    static_r = {s: rc[s].mean(axis=0) for s in keys}
+    dyn_t = {s: tc[s] - static_t[s][None] for s in keys}
+    dyn_r = {s: rc[s] - static_r[s][None] for s in keys}
+    vmax_i = float(max(tc["I"].max(), rc["I"].max())) or 1.0
+    max_dyn = float(max(np.abs(dyn_t["I"]).max(), np.abs(dyn_r["I"]).max())) or 1.0
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+
+    frames = []
+    for t in range(n_t):
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8), dpi=90)
+        rows = (("truth", tc, dyn_t, static_t), ("recon", rc, dyn_r, static_r))
+        for i, (label, cube, dyn, static) in enumerate(rows):
+            _evpa_quiver(axes[i, 0], cube["I"][t], cube["Q"][t], cube["U"][t], fov_uas, vmax=vmax_i)
+            _evpa_quiver(
+                axes[i, 1],
+                dyn["I"][t],
+                dyn["Q"][t],
+                dyn["U"][t],
+                fov_uas,
+                cmap_bg="coolwarm",
+                vmin=-max_dyn,
+                vmax=max_dyn,
+            )
+            _evpa_quiver(axes[i, 2], static["I"], static["Q"], static["U"], fov_uas, vmax=vmax_i)
+            axes[i, 0].set_ylabel(label, fontsize=14)
+        # truth dynamic emission outlined over the reconstruction's dynamic panel
+        axes[1, 1].contour(
+            np.abs(dyn_t["I"][t]),
+            levels=[0.3 * max_dyn],
+            extent=lims,
+            colors="black",
+            alpha=0.7,
+            linewidths=1,
+            origin="upper",
+        )
+        for j, title in enumerate(("Total", "Dynamic", "Static")):
+            axes[0, j].set_title(title, fontsize=14)
+        if times is not None:
+            fig.suptitle(f"t = {float(times[t]):.2f}", fontsize=14)
+        fig.tight_layout()
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
         plt.close(fig)
