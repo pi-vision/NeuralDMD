@@ -106,9 +106,9 @@ This is the same factoring as `ehtim.pol_conventions.jones_matrix`
 (`J = G @ (I + D)`), pinned in `test_stokes_ehtim.py`.
 
 **We apply the RIME to the MODEL** visibilities (corrupt the prediction, then
-χ² against the data). This differs from KINE, which corrects the *data*; the two
-are equivalent for pure diagonal gains but **not** once D-terms enter, so
-model-side application is the correct general choice.
+χ² against the data), rather than correcting the *data*. The two are equivalent
+for pure diagonal gains but **not** once D-terms enter, so model-side
+application is the correct general choice.
 
 Fast paths: when `D = 0`, `g_R = g_L = g`, and Stokes-I only, the chain reduces
 to the scalar `V'_mn = g_m g_n* V_mn`.
@@ -117,9 +117,9 @@ to the scalar `V'_mn = g_m g_n* V_mn`.
 
 χ² is computed per **real** degree of freedom: each complex-visibility term is
 divided by `2·Σ(mask)` (real + imaginary parts), consistent across all Stokes
-and products, with equal weights (KINE pattern). Padded visibility entries
-(σ = 1e6, mask = 0) contribute zero. Closure phases stay gain-invariant and
-serve as a calibration canary.
+and products, with equal weights. Padded visibility entries (σ = 1e6, mask = 0)
+contribute zero. Closure phases stay gain-invariant and serve as a calibration
+canary.
 
 ## 5. Derived quantities
 

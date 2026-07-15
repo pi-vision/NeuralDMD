@@ -67,14 +67,27 @@ _PRODUCT_COEFFS: dict[str, dict[str, complex]] = {
 def stokes_to_products_matrix(
     products: tuple[str, ...], stokes: tuple[str, ...] = STOKES_ORDER
 ) -> np.ndarray:
-    """Matrix ``M`` (n_products, n_stokes) with ``product_vec = M @ stokes_vec``.
+    """Build the linear map from Stokes parameters to correlation products.
 
     Parameters
     ----------
     products : tuple of str
         Correlation products to produce, e.g. ``("RR", "RL", "LR", "LL")``.
-    stokes : tuple of str
-        Stokes parameters present in the sky model, in order (default IQUV).
+        Each must be one of RR/LL/RL/LR (circular) or XX/YY/XY/YX (linear).
+    stokes : tuple of str, optional
+        Stokes parameters present in the sky model, in order. Defaults to the
+        full ``("I", "Q", "U", "V")``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex128 array ``M`` of shape ``(len(products), len(stokes))`` such
+        that ``product_vec = M @ stokes_vec``.
+
+    Raises
+    ------
+    ValueError
+        If any requested product is not a recognized correlation product.
     """
     unknown = set(products) - _PRODUCT_COEFFS.keys()
     if unknown:
@@ -88,10 +101,22 @@ def stokes_to_products_matrix(
 
 
 def products_to_stokes_matrix(stokes: tuple[str, ...], products: tuple[str, ...]) -> np.ndarray:
-    """Least-squares inverse of :func:`stokes_to_products_matrix`.
+    """Build the (pseudo-)inverse map from correlation products to Stokes.
 
-    For a complete product basis (e.g. all four circular products) this is the
-    exact inverse; otherwise it is the Moore-Penrose pseudo-inverse.
+    Parameters
+    ----------
+    stokes : tuple of str
+        Stokes parameters to recover, in order (e.g. ``("I", "Q", "U", "V")``).
+    products : tuple of str
+        Correlation products available as input (e.g. the four circular hands).
+
+    Returns
+    -------
+    numpy.ndarray
+        Complex128 array of shape ``(len(stokes), len(products))`` mapping a
+        product vector to a Stokes vector. For a complete product basis this is
+        the exact inverse of :func:`stokes_to_products_matrix`; otherwise it is
+        the Moore-Penrose pseudo-inverse.
     """
     return np.linalg.pinv(stokes_to_products_matrix(products, stokes))
 
@@ -107,6 +132,12 @@ def stokes_pauli_matrices() -> dict[str, np.ndarray]:
     this linear basis and put the feed transform inside J (F = BASIS_LIN_TO_CIRC),
     or work directly with the circular coherency [[RR, RL], [LR, LL]]; the two are
     equivalent. I->identity, Q,U,V->Pauli-like.
+
+    Returns
+    -------
+    dict of str -> numpy.ndarray
+        Keys ``"I"``, ``"Q"``, ``"U"``, ``"V"``; each a ``(2, 2)`` complex128
+        basis matrix. ``B = sum_s S_s * result[s]`` is the coherency matrix.
     """
     return {
         "I": np.array([[1, 0], [0, 1]], dtype=np.complex128),
@@ -117,10 +148,35 @@ def stokes_pauli_matrices() -> dict[str, np.ndarray]:
 
 
 def evpa(Q: np.ndarray, U: np.ndarray) -> np.ndarray:
-    """Electric-vector position angle chi = 1/2 * atan2(U, Q), in radians."""
+    """Electric-vector position angle ``chi = 1/2 * atan2(U, Q)`` (TMS/IAU).
+
+    Parameters
+    ----------
+    Q, U : numpy.ndarray
+        Stokes Q and U (image pixels or visibilities), broadcastable together.
+
+    Returns
+    -------
+    numpy.ndarray
+        EVPA in radians, in ``[-pi/2, pi/2]``.
+    """
     return 0.5 * np.arctan2(U, Q)
 
 
 def linear_polarized_intensity(Q: np.ndarray, U: np.ndarray) -> np.ndarray:
-    """P = sqrt(Q^2 + U^2). Note: NOT divided by I (we never divide by I)."""
+    """Linearly polarized intensity ``P = sqrt(Q^2 + U^2)``.
+
+    Note this is the absolute (not fractional) polarized intensity -- we never
+    divide by I anywhere in the pipeline.
+
+    Parameters
+    ----------
+    Q, U : numpy.ndarray
+        Stokes Q and U, broadcastable together.
+
+    Returns
+    -------
+    numpy.ndarray
+        Non-negative polarized intensity, same broadcast shape as the inputs.
+    """
     return np.sqrt(Q**2 + U**2)

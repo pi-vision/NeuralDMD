@@ -28,6 +28,7 @@ pytestmark = [pytest.mark.ehtim, pytest.mark.filterwarnings("ignore")]
 
 
 def _random_stokes(n=200, seed=0):
+    """Return a ``(4, n)`` array of random real Stokes vectors (rows I, Q, U, V)."""
     rng = np.random.default_rng(seed)
     return rng.normal(size=(4, n))  # rows: I, Q, U, V
 

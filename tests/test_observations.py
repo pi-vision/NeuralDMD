@@ -9,6 +9,7 @@ from neuraldmd.data.observations import ObsProducts
 
 
 def test_load_legacy_v1_as_stokes_i(tiny_obs):
+    """A legacy (unsuffixed) obs_dir loads as a Stokes-I v1 dataset."""
     op = ObsProducts.from_obs_dir(tiny_obs.data_dir)
     assert op.stokes == ("I",)
     assert op.version == 1
@@ -19,6 +20,20 @@ def test_load_legacy_v1_as_stokes_i(tiny_obs):
 
 
 def _synthetic_iqu(T=4, M=6, P=25, seed=0):
+    """Build a small random (I, Q, U) ObsProducts for round-trip tests.
+
+    Parameters
+    ----------
+    T, M, P : int
+        Frame, visibility, and pixel counts.
+    seed : int
+        RNG seed for reproducibility.
+
+    Returns
+    -------
+    ObsProducts
+        A self-consistent random three-Stokes dataset.
+    """
     rng = np.random.default_rng(seed)
     A = (rng.normal(size=(T, M, P)) + 1j * rng.normal(size=(T, M, P))).astype(np.complex64)
     stokes = ("I", "Q", "U")
@@ -32,6 +47,7 @@ def _synthetic_iqu(T=4, M=6, P=25, seed=0):
 
 
 def test_v2_roundtrip(tmp_path):
+    """Writing then reloading a v2 obs_dir recovers A and per-Stokes arrays."""
     op = _synthetic_iqu()
     op.to_obs_dir(tmp_path / "obs")
     assert (tmp_path / "obs" / "manifest.json").exists()
@@ -48,6 +64,7 @@ def test_v2_roundtrip(tmp_path):
 
 
 def test_masks_are_per_stokes(tmp_path):
+    """Per-Stokes masks are independent and survive a round-trip."""
     # a station flagged for Q but not I -> different masks survive round-trip
     op = _synthetic_iqu(seed=1)
     op.masks["Q"][:, 0] = 0.0
@@ -59,6 +76,7 @@ def test_masks_are_per_stokes(tmp_path):
 
 
 def test_validate_catches_shape_mismatch():
+    """A per-Stokes array whose shape disagrees with A raises ValueError."""
     A = np.zeros((3, 5, 9), np.complex64)
     good = {"I": np.zeros((3, 5), np.complex64)}
     with pytest.raises(ValueError, match="shape"):
@@ -66,6 +84,7 @@ def test_validate_catches_shape_mismatch():
 
 
 def test_validate_catches_missing_stokes():
+    """Declaring a Stokes with no matching target array raises ValueError."""
     A = np.zeros((3, 5, 9), np.complex64)
     t = {"I": np.zeros((3, 5), np.complex64)}
     with pytest.raises(ValueError, match="!="):
