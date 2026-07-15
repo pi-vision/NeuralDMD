@@ -1,11 +1,23 @@
-"""Polarized NeuralDMD: an independent :class:`NeuralDMD` per Stokes parameter.
+"""Polarized NeuralDMD: polarization parameterized as a *fraction of Stokes I*.
 
-The polarized reconstruction is the natural generalization of the scalar model:
-each Stokes parameter (I, Q, U, and optionally V) gets its own coordinate and
-temporal networks. With ``stokes=("I",)`` the container is a thin wrapper whose
-Stokes-I sub-model is identical to a standalone :class:`NeuralDMD` -- so no
-Stokes-I behavior changes (asserted by the parity test in
-``tests/test_polarized.py``).
+Stokes I is a NeuralDMD field; the linear polarization is derived from it as
+
+    Q = m_l * I * cos(2 xi),    U = m_l * I * sin(2 xi),    V = m_c * I,
+
+with the fractional magnitude and EVPA direction produced by additional NeuralDMD
+raw fields passed through bounded activations. This ties polarization to the total
+intensity (pol only where I is), enforces the physical bound ``P <= I`` by
+construction, and -- via an output bias -- starts the source *unpolarized* and
+grows polarization as the cross-hand data demand it. Crucially the model
+*multiplies* by I (never divides), so the likelihood stays on absolute Stokes (or
+correlation products).
+
+Why this and not free (Q, U) fields: a physical Stokes vector obeys
+``P = sqrt(Q^2+U^2+V^2) <= I`` and ``Q=U=V=0 where I=0``. Free (Q, U) fields
+violate both -- they can fit sparse visibilities to chi^2 ~ 1 while producing
+unphysical polarization images. ``(I, m_l, xi)`` is the same three degrees of
+freedom in the coordinate chart where those constraints are a simple box on
+``m_l``. See ``docs/polarization_parameterization.tex``.
 """
 
 from __future__ import annotations
@@ -19,165 +31,32 @@ from .model import NeuralDMD, physical_intensities
 
 
 class PolarizedNeuralDMD(eqx.Module):
-    """A dict of per-Stokes :class:`NeuralDMD` models over a shared coordinate grid.
+    """Polarized model with polarization parameterized as a fraction of I.
 
-    Each Stokes parameter has independent spatial and temporal networks; the
-    models are held in a plain dict, which equinox treats as a pytree, so the
-    container composes with ``eqx.partition`` / ``optax`` exactly like a single
-    model.
+    Sub-models (each a :class:`NeuralDMD` raw field, mapped through a bounded
+    activation)::
 
-    Attributes
-    ----------
-    models : dict of str -> NeuralDMD
-        One model per Stokes parameter, keyed by name (dynamic pytree leaves).
-    stokes : tuple of str
-        Stokes parameters, in order (static metadata).
-    """
+        m_l              = sigmoid(raw - outshift) * scaling_ml   in [0, scaling_ml]
+        (cos2xi, sin2xi) = (c_raw, s_raw) / ||(c_raw, s_raw)||     unit EVPA direction
+        m_c              = (sigmoid(raw - outshift) - 0.5) * 2     in [-1, 1]   (V only)
 
-    models: dict[str, NeuralDMD]
-    stokes: tuple[str, ...] = eqx.field(static=True)
-
-    def __init__(
-        self,
-        stokes: tuple[str, ...] | StokesConfig,
-        r: int,
-        *,
-        key: jax.Array,
-        **model_kwargs,
-    ):
-        """Build one :class:`NeuralDMD` per Stokes from independent split keys.
-
-        Parameters
-        ----------
-        stokes : tuple of str or StokesConfig
-            Stokes parameters to model; validated via :class:`StokesConfig`.
-        r : int
-            Number of complex DMD modes per Stokes (forwarded to each NeuralDMD).
-        key : jax.Array
-            PRNG key, split into one independent subkey per Stokes (so an I-only
-            container matches ``NeuralDMD(key=jax.random.split(key, 1)[0])``).
-        **model_kwargs
-            Forwarded verbatim to every :class:`NeuralDMD` (e.g. ``hidden_size``,
-            ``num_layers``, ``num_frequencies``, ``t_scale``).
-        """
-        cfg = stokes if isinstance(stokes, StokesConfig) else StokesConfig(tuple(stokes))
-        self.stokes = cfg.stokes
-        keys = jax.random.split(key, len(self.stokes))
-        self.models = {
-            s: NeuralDMD(r=r, key=keys[i], **model_kwargs) for i, s in enumerate(self.stokes)
-        }
-
-    def __call__(self, xy: jax.Array) -> dict[str, tuple]:
-        """Evaluate every sub-model's spatial/temporal outputs at ``xy``.
-
-        Parameters
-        ----------
-        xy : jax.Array
-            ``(P, 2)`` pixel coordinates.
-
-        Returns
-        -------
-        dict of str -> tuple
-            ``{stokes: (W0, W, Omega, b0, b)}`` -- each sub-model's raw outputs.
-        """
-        return {s: m(xy) for s, m in self.models.items()}
-
-    def reconstruct(
-        self,
-        xy: jax.Array,
-        times: jax.Array,
-        frame_max: float = 1.0,
-        frame_min: float = 0.0,
-    ) -> dict[str, tuple]:
-        """Reconstruct each Stokes movie on ``xy`` at ``times``.
-
-        Parameters
-        ----------
-        xy : jax.Array
-            ``(P, 2)`` pixel coordinates.
-        times : jax.Array
-            ``(T,)`` normalized times.
-        frame_max, frame_min : float
-            Output scaling applied to every Stokes, matching
-            :meth:`NeuralDMD.reconstruct`. The signedness of Q/U/V (which have no
-            ``frame_min`` offset) is handled by the loss/training layer, not here.
-
-        Returns
-        -------
-        dict of str -> tuple
-            ``{stokes: (intensities, static, dynamic)}``, each ``(P, T)``.
-        """
-        return {
-            s: m.reconstruct(xy, times, frame_max, frame_min) for s, m in self.models.items()
-        }
-
-    def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
-        """Physical per-Stokes image cubes and per-network modes (loss/eval interface).
-
-        Parameters
-        ----------
-        xy : jax.Array
-            ``(P, 2)`` pixel coordinates.
-        times : jax.Array
-            ``(T,)`` normalized frame times.
-        frame_max, frame_min : dict of str -> float
-            Per-Stokes output scaling.
-
-        Returns
-        -------
-        images : dict of str -> jax.Array
-            ``{stokes: (P, T)}`` physical Stokes images (Q, U, V signed).
-        modes : list of tuple
-            One ``(W0, W, b0, b)`` per sub-network, for the sparsity penalty.
-        """
-        images, modes = {}, []
-        for s in self.stokes:
-            img, mode = physical_intensities(self.models[s], xy, times, frame_max[s], frame_min[s])
-            images[s] = img
-            modes.append(mode)
-        return images, modes
-
-    @property
-    def i_submodel(self) -> NeuralDMD:
-        """The Stokes-I :class:`NeuralDMD` (target of disk-template pretraining)."""
-        return self.models["I"]
-
-    def replace_i_submodel(self, new_i: NeuralDMD) -> PolarizedNeuralDMD:
-        """Return a copy with the Stokes-I sub-model replaced (e.g. by a pretrained one)."""
-        return eqx.tree_at(lambda m: m.models["I"], self, new_i)
-
-
-class FractionalPolNeuralDMD(eqx.Module):
-    """Polarization parameterized as a *fraction of I* (KINE-style, tied to I).
-
-    Rather than free per-Stokes fields, the linear polarization is
-    ``Q = m_l * I * cos(2 xi)``, ``U = m_l * I * sin(2 xi)`` (and ``V = m_c * I``),
-    where the fractional magnitude and EVPA are bounded fields of a NeuralDMD raw
-    output::
-
-        m_l           = sigmoid(raw - outshift) * scaling_ml    in [0, scaling_ml]
-        (cos2xi, sin2xi) = (c_raw, s_raw) / ||(c_raw, s_raw)||   unit EVPA direction
-        m_c           = (sigmoid(raw - outshift) - 0.5) * 2      in [-1, 1]   (V only)
-
-    The EVPA direction is unit-normalized, so ``P = sqrt(Q^2+U^2) = m_l*|I|``
-    exactly and the physical bound ``P <= scaling_ml*|I| <= I`` holds strictly
-    (unlike separate-sigmoid EVPA components, which allow ``P`` up to ``sqrt(2) m_l I``).
-    This structurally ties polarization to I (pol only where I is) and -- because
-    ``outshift`` makes
-    ``m_l ~ sigmoid(-outshift) ~ 0`` at init -- starts the source *unpolarized*
-    and grows polarization during training. The loss/eval remain on absolute
-    Stokes (or products): pol is a *multiply* by I, never a divide.
+    Because the EVPA direction is unit-normalized, ``P = sqrt(Q^2+U^2) = m_l*|I|``
+    exactly, so ``P <= scaling_ml*|I| <= I`` holds strictly. ``outshift`` biases
+    ``m_l`` small at init (a modest initial polarization). NB: too large an
+    ``outshift`` saturates the sigmoid and starves its gradient, so polarization
+    never grows -- with the gauge-fixed O(1) raw scale, ``~2`` works well (``10``
+    leaves the fit unpolarized, RL/LR chi^2 huge).
 
     Attributes
     ----------
     intensity : NeuralDMD
         Stokes-I field (physical scaling via frame_max/frame_min; disk-pretrainable).
     frac, cos2xi, sin2xi : NeuralDMD
-        Raw fields for ``m_l`` and the EVPA components.
+        Raw fields for ``m_l`` and the EVPA direction.
     circ : NeuralDMD or None
         Raw field for ``m_c`` (present iff V is modeled).
     stokes : tuple of str
-        Stokes produced (static). outshift, scaling_ml : bound/init controls (static).
+        Stokes produced (static). ``outshift``, ``scaling_ml`` are static controls.
     """
 
     intensity: NeuralDMD
@@ -195,7 +74,7 @@ class FractionalPolNeuralDMD(eqx.Module):
         r: int,
         *,
         key: jax.Array,
-        outshift: float = 10.0,
+        outshift: float = 2.0,
         scaling_ml: float = 1.0,
         **model_kwargs,
     ):
@@ -230,6 +109,16 @@ class FractionalPolNeuralDMD(eqx.Module):
 
     def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
         """Physical per-Stokes image cubes and per-network modes (loss/eval interface).
+
+        Parameters
+        ----------
+        xy : jax.Array
+            ``(P, 2)`` pixel coordinates.
+        times : jax.Array
+            ``(T,)`` normalized frame times.
+        frame_max, frame_min : dict of str -> float
+            Output scaling for Stokes I (only the ``"I"`` entry is used; the pol
+            fields are bounded by their own activations).
 
         Returns
         -------
@@ -271,6 +160,6 @@ class FractionalPolNeuralDMD(eqx.Module):
         """The Stokes-I :class:`NeuralDMD` (target of disk-template pretraining)."""
         return self.intensity
 
-    def replace_i_submodel(self, new_i: NeuralDMD) -> FractionalPolNeuralDMD:
+    def replace_i_submodel(self, new_i: NeuralDMD) -> PolarizedNeuralDMD:
         """Return a copy with the Stokes-I field replaced (e.g. by a pretrained one)."""
         return eqx.tree_at(lambda m: m.intensity, self, new_i)

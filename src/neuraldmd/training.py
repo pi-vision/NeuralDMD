@@ -125,9 +125,9 @@ def make_polarized_optimizer(
 ):
     """Build the optimizer for a :class:`PolarizedNeuralDMD` (single transform).
 
-    Per-Stokes freezing (the hierarchical study mode) is applied in
-    :func:`polarized_train_step` via ``frozen_stokes`` -- the frozen sub-models'
-    updates are zeroed there, an exact freeze including weight decay.
+    Intensity freezing (the hierarchical study mode) is applied in
+    :func:`polarized_train_step` via ``freeze_intensity`` -- the Stokes-I
+    sub-model's update is zeroed there, an exact freeze including weight decay.
 
     Parameters
     ----------
@@ -164,10 +164,10 @@ def make_polarized_optimizer(
     raise ValueError(f"unknown optimizer {optimizer!r}")
 
 
-def _zero_frozen_updates(updates, frozen_stokes: tuple[str, ...]):
-    """Zero the update pytree for each frozen Stokes sub-model (exact freeze)."""
-    replace = [jax.tree_util.tree_map(jnp.zeros_like, updates.models[s]) for s in frozen_stokes]
-    return eqx.tree_at(lambda u: [u.models[s] for s in frozen_stokes], updates, replace=replace)
+def _zero_intensity_update(updates):
+    """Zero the update for the Stokes-I (``intensity``) sub-model (exact freeze)."""
+    zeroed = jax.tree_util.tree_map(jnp.zeros_like, updates.intensity)
+    return eqx.tree_at(lambda u: u.intensity, updates, zeroed)
 
 
 @eqx.filter_jit
@@ -184,7 +184,7 @@ def polarized_train_step(
     frame_max,
     frame_min,
     *,
-    frozen_stokes: tuple[str, ...] = (),
+    freeze_intensity: bool = False,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
@@ -194,10 +194,10 @@ def polarized_train_step(
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
-    Differentiates the loss with respect to the whole model pytree; any
-    ``frozen_stokes`` sub-models have their update zeroed (held fixed) for the
-    hierarchical study mode. All keyword-only arguments are static under
-    ``eqx.filter_jit``.
+    Differentiates the loss with respect to the whole model pytree. When
+    ``freeze_intensity`` is set, the Stokes-I (``intensity``) sub-model's update
+    is zeroed (held fixed) -- the hierarchical study mode (fit polarization on a
+    frozen I). All keyword-only arguments are static under ``eqx.filter_jit``.
 
     Returns
     -------
@@ -216,8 +216,8 @@ def polarized_train_step(
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
     updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
-    if frozen_stokes:
-        updates = _zero_frozen_updates(updates, tuple(frozen_stokes))
+    if freeze_intensity:
+        updates = _zero_intensity_update(updates)
     model = eqx.apply_updates(model, updates)
     return model, opt_state, loss, aux
 
@@ -232,7 +232,7 @@ def polarized_train_epoch(
     frame_max,
     frame_min,
     *,
-    frozen_stokes: tuple[str, ...] = (),
+    freeze_intensity: bool = False,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
@@ -272,7 +272,7 @@ def polarized_train_epoch(
             optimizer,
             frame_max,
             frame_min,
-            frozen_stokes=frozen_stokes,
+            freeze_intensity=freeze_intensity,
             basis=basis,
             products=products,
             neg_weight=neg_weight,
@@ -301,7 +301,7 @@ def train_polarized_model(
     *,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
-    frozen_stokes: tuple[str, ...] = (),
+    freeze_intensity: bool = False,
     initial_lr: float = 3e-4,
     weight_decay: float = 1e-4,
     optimizer_name: str = "adamw",
@@ -347,7 +347,7 @@ def train_polarized_model(
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
             model, opt_state, loss, chi2 = polarized_train_epoch(
                 model, opt_state, epoch_data, optimizer, epoch_key, frame_max, frame_min,
-                frozen_stokes=frozen_stokes, basis=basis, products=products,
+                freeze_intensity=freeze_intensity, basis=basis, products=products,
                 neg_weight=neg_weight, w_sparse_weight=w_sparse_weight,
                 b_sparse_weight=b_sparse_weight, p_le_i_weight=p_le_i_weight,
             )

@@ -50,13 +50,15 @@ def _batch(p=16, t=4, v=6, k=2, seed=0):
 
 
 def test_i_only_matches_legacy_loss():
-    """polarized_loss_fn on ("I",) equals loss_fn's total and chi2_vis exactly."""
+    """polarized_loss_fn on ("I",) equals loss_fn's total and chi2_vis. The I field
+    is the model's first split key; sparsity is off because the model carries extra
+    pol sub-nets the scalar loss_fn does not (chi2 + negativity still match)."""
     key = jax.random.PRNGKey(0)
     r = 4
     pol = PolarizedNeuralDMD(("I",), r=r, key=key, **MODEL_KW)
-    ref = NeuralDMD(r=r, key=jax.random.split(key, 1)[0], **MODEL_KW)
+    ref = NeuralDMD(r=r, key=jax.random.split(key, 4)[0], **MODEL_KW)
     d = _batch()
-    w = dict(neg_weight=1.0, w_sparse_weight=0.5, b_sparse_weight=0.5)
+    w = dict(neg_weight=1.0, w_sparse_weight=0.0, b_sparse_weight=0.0)
 
     legacy_total, legacy_aux = loss_fn(
         ref, d["xy"], d["fb"], d["vt"], d["vs"], d["vm"], d["at"], d["as_"],
@@ -137,13 +139,13 @@ _PRODUCTS = ("RR", "LL", "RL", "LR")
 
 def _model_products(pol, d, fmax, fmin, products=_PRODUCTS):
     """Independently recompute the modeled correlation-product visibilities."""
-    from neuraldmd.model import physical_intensities
     from neuraldmd.physics.stokes import stokes_to_products_matrix
 
-    vis = {}
-    for s in pol.stokes:
-        img, _ = physical_intensities(pol.models[s], d["xy"], d["ti"], fmax[s], fmin[s])
-        vis[s] = np.einsum("tvp,pt->tv", np.asarray(d["A"]), np.asarray(img).astype(np.complex64))
+    images, _ = pol.stokes_fields(d["xy"], d["ti"], fmax, fmin)
+    vis = {
+        s: np.einsum("tvp,pt->tv", np.asarray(d["A"]), np.asarray(images[s]).astype(np.complex64))
+        for s in pol.stokes
+    }
     m = stokes_to_products_matrix(tuple(products), pol.stokes)
     out = {}
     for i, p in enumerate(products):
