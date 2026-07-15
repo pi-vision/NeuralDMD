@@ -196,19 +196,41 @@ def make_polarized_frames(
     return intensity, q, u, times
 
 
-def _add_twisty_pol(im, linpol_frac, circpol_frac):
-    """Add the standard twisty-EVPA linear polarization + uniform circular pol to
-    an ehtim Image in place. Following the mring+hs pol model, Q and U use
-    different EVPA angles: ``Q=m·I·cos(2(φ+π/2))``, ``U=m·I·sin(2φ)`` with the
-    azimuth ``φ=atan2(y,x)`` -- so the effective EVPA ``χ=½atan2(U,Q)=π/2−φ``
-    winds around the ring (twisty), not radial. ``V=v·I``."""
+def _add_radial_pol(im, linpol_frac, circpol_frac, qu_shift=np.pi / 2):
+    """Add a spiral-EVPA linear polarization + uniform circular pol to an ehtim
+    Image in place (the ``mring+hs`` polarization pattern).
+
+    Uses the ehtim ``qimage``/``uimage`` convention with a global EVPA twist
+    ``qu_shift`` split symmetrically between Q and U:
+    ``Q = m·I·cos(2(φ + qu_shift/2))``, ``U = m·I·sin(2(φ − qu_shift/2))`` where
+    ``φ = atan2(y, x)`` and ``m = linpol_frac``. With ``qu_shift = π/2`` (default)
+    the EVPA is a constant 45° offset from radial -- a spiral ("twisty") pattern
+    that winds around the ring; ``qu_shift`` rotates it globally (``0`` gives a
+    radial B-field / tangential EVPA). ``V = circpol_frac · I``.
+
+    Parameters
+    ----------
+    im : ehtim.image.Image
+        Image whose ``qvec``/``uvec``/``vvec`` are set in place.
+    linpol_frac : float
+        Fractional linear polarization ``|m|``.
+    circpol_frac : float
+        Fractional circular polarization ``|v|`` (uniform, ``V = v·I``).
+    qu_shift : float, optional
+        Global EVPA twist [rad]. Default ``π/2`` (spiral, 45° from radial).
+
+    Returns
+    -------
+    None
+        ``im`` is modified in place.
+    """
     npix = im.xdim
     grid = np.linspace(-1.0, 1.0, npix)
     xg, yg = np.meshgrid(grid, grid)
     phi = np.angle(xg + 1j * yg)
     intensity = np.asarray(im.imvec).reshape(im.ydim, im.xdim)
-    im.qvec = (linpol_frac * intensity * np.cos(2 * (phi + np.pi / 2))).flatten()
-    im.uvec = (linpol_frac * intensity * np.sin(2 * phi)).flatten()
+    im.qvec = (linpol_frac * intensity * np.cos(2 * (phi + qu_shift / 2))).flatten()
+    im.uvec = (linpol_frac * intensity * np.sin(2 * (phi - qu_shift / 2))).flatten()
     im.vvec = circpol_frac * np.asarray(im.imvec)
 
 
@@ -230,6 +252,7 @@ def make_mring_hs_pol_movie(
     hs_fwhm_uas=20.0,
     linpol_frac=0.2,
     circpol_frac=0.002,
+    qu_shift_rad=np.pi / 2,
     phase0_deg=0.0,
     source="SgrA",
     **sky,
@@ -237,11 +260,12 @@ def make_mring_hs_pol_movie(
     """Canonical polarized ``mring+hsCW`` movie via an ehtim thick m-ring.
 
     Reproduces the standard Sgr A* dynamics ``mring+hsCW`` test model: an ehtim
-    thick m-ring (``add_thick_mring``) with diameter, width (``alpha``), and an
-    m=1 azimuthal asymmetry, carrying a **twisty-EVPA** linear polarization (the
-    EVPA winds around the ring; see :func:`_add_twisty_pol`) and a small uniform
-    circular polarization, plus a Gaussian hot spot orbiting clockwise. Defaults
-    are the standard model's parameter values. Requires ehtim.
+    thick m-ring (``add_thick_mring``) with diameter, width (``alpha``) and an
+    m=1 azimuthal asymmetry, carrying a **spiral-EVPA** linear polarization (the
+    EVPA is a constant 45° offset from radial, winding around the ring; see
+    :func:`_add_radial_pol`) and a small uniform circular polarization, plus an
+    **unpolarized** Gaussian hot spot orbiting the ring. Defaults are the
+    standard model's parameter values. Requires ehtim.
 
     Parameters
     ----------
@@ -260,6 +284,9 @@ def make_mring_hs_pol_movie(
         Hot-spot orbital radius and Gaussian FWHM [uas].
     linpol_frac, circpol_frac : float
         Fractional linear (|m|) and circular (|v|) polarization of the ring.
+    qu_shift_rad : float
+        Global EVPA twist [rad]; ``π/2`` gives the spiral (45°-from-radial)
+        pattern of the standard model.
     phase0_deg : float
         Initial hot-spot orbital phase [deg].
     source : str
@@ -275,12 +302,16 @@ def make_mring_hs_pol_movie(
     sky = {**SGRA, **sky}
     fov = fov_uas * eh.RADPERUAS
     times = np.linspace(tstart_hr, tstop_hr, num_frames)
-    sign = -1.0 if str(direction).upper() == "CW" else 1.0
     mring_flux = total_flux - hs_flux
+    # linear orbital-angle ramp over the window (n_loops full orbits; +1 for CW)
+    n_loops = (tstop_hr - tstart_hr) / (period_min / 60.0)
+    sign = 1.0 if str(direction).upper() == "CW" else -1.0
+    angles = np.deg2rad(phase0_deg) + np.linspace(0.0, sign, num_frames) * 2 * np.pi * n_loops
+    r = ring_radius_uas * eh.RADPERUAS
+    fwhm = hs_fwhm_uas * eh.RADPERUAS
 
     frames = []
-    for t in times:
-        angle = np.deg2rad(phase0_deg) + sign * 2 * np.pi * (t - tstart_hr) * 60.0 / period_min
+    for angle, t in zip(angles, times, strict=False):
         model = eh.model.Model(ra=sky["ra"], dec=sky["dec"], rf=sky["rf"], source=source)
         im = model.add_thick_mring(
             F0=mring_flux,
@@ -291,18 +322,10 @@ def make_mring_hs_pol_movie(
             beta_list=[beta1_abs * np.exp(-1j * np.deg2rad(-pa_deg))],
         ).make_image(fov, npix)
         im.mjd = sky["mjd"]
-        _add_twisty_pol(im, linpol_frac, circpol_frac)
-        r = ring_radius_uas * eh.RADPERUAS
+        _add_radial_pol(im, linpol_frac, circpol_frac, qu_shift_rad)  # spiral ring pol
+        # unpolarized orbiting hot spot
         im = im.add_gauss(
-            hs_flux,
-            [
-                hs_fwhm_uas * eh.RADPERUAS,
-                hs_fwhm_uas * eh.RADPERUAS,
-                0.0,
-                r * np.cos(angle),
-                r * np.sin(angle),
-            ],
-            pol=None,
+            hs_flux, [fwhm, fwhm, 0.0, r * np.cos(angle), r * np.sin(angle)], pol=None
         )
         im.time = float(t)
         frames.append(im)

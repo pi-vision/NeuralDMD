@@ -659,7 +659,7 @@ def generate_polarized_dataset(
     npix, fov_uas, num_frames, tstart_hr, tstop_hr, tint, bw
         Image grid, field of view, sampling, integration time [s], bandwidth [Hz].
     linpol_frac : float
-        Fractional linear polarization of the ring.
+        Fractional linear polarization of the ring (spiral EVPA).
     fractional_noise : float
         Fractional systematic noise added in quadrature (0 disables).
     ampcal, phasecal : bool
