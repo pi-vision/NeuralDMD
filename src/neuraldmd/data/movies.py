@@ -196,6 +196,115 @@ def make_polarized_frames(
     return intensity, q, u, times
 
 
+def _add_twisty_pol(im, linpol_frac, circpol_frac):
+    """Add the standard twisty-EVPA linear polarization + uniform circular pol to
+    an ehtim Image in place. Following the mring+hs pol model, Q and U use
+    different EVPA angles: ``Q=m·I·cos(2(φ+π/2))``, ``U=m·I·sin(2φ)`` with the
+    azimuth ``φ=atan2(y,x)`` -- so the effective EVPA ``χ=½atan2(U,Q)=π/2−φ``
+    winds around the ring (twisty), not radial. ``V=v·I``."""
+    npix = im.xdim
+    grid = np.linspace(-1.0, 1.0, npix)
+    xg, yg = np.meshgrid(grid, grid)
+    phi = np.angle(xg + 1j * yg)
+    intensity = np.asarray(im.imvec).reshape(im.ydim, im.xdim)
+    im.qvec = (linpol_frac * intensity * np.cos(2 * (phi + np.pi / 2))).flatten()
+    im.uvec = (linpol_frac * intensity * np.sin(2 * phi)).flatten()
+    im.vvec = circpol_frac * np.asarray(im.imvec)
+
+
+def make_mring_hs_pol_movie(
+    npix=50,
+    fov_uas=200.0,
+    num_frames=64,
+    tstart_hr=9.0,
+    tstop_hr=15.0,
+    period_min=80.0,
+    direction="CW",
+    total_flux=2.7,
+    hs_flux=0.3,
+    pa_deg=120.0,
+    diameter_uas=52.0,
+    alpha_uas=15.0,
+    beta1_abs=0.23,
+    ring_radius_uas=26.0,
+    hs_fwhm_uas=20.0,
+    linpol_frac=0.2,
+    circpol_frac=0.002,
+    phase0_deg=0.0,
+    source="SgrA",
+    **sky,
+):
+    """Canonical polarized ``mring+hsCW`` movie via an ehtim thick m-ring.
+
+    Reproduces the standard Sgr A* dynamics ``mring+hsCW`` test model: an ehtim
+    thick m-ring (``add_thick_mring``) with diameter, width (``alpha``), and an
+    m=1 azimuthal asymmetry, carrying a **twisty-EVPA** linear polarization (the
+    EVPA winds around the ring; see :func:`_add_twisty_pol`) and a small uniform
+    circular polarization, plus a Gaussian hot spot orbiting clockwise. Defaults
+    are the standard model's parameter values. Requires ehtim.
+
+    Parameters
+    ----------
+    npix, fov_uas, num_frames, tstart_hr, tstop_hr
+        Image grid, field of view [uas], and observation sampling.
+    period_min : float
+        Hot-spot orbital period [minutes].
+    direction : {"CW", "CCW"}
+        Orbital sense.
+    total_flux, hs_flux : float
+        Total and hot-spot flux [Jy] (ring flux = total - hs).
+    pa_deg, diameter_uas, alpha_uas, beta1_abs : float
+        m-ring position angle [deg], diameter [uas], thickness/width [uas], and
+        m=1 asymmetry amplitude.
+    ring_radius_uas, hs_fwhm_uas : float
+        Hot-spot orbital radius and Gaussian FWHM [uas].
+    linpol_frac, circpol_frac : float
+        Fractional linear (|m|) and circular (|v|) polarization of the ring.
+    phase0_deg : float
+        Initial hot-spot orbital phase [deg].
+    source : str
+        Source name. **sky overrides ra/dec/rf/mjd.
+
+    Returns
+    -------
+    ehtim.movie.Movie
+        The polarized movie (each frame carries I, Q, U, V).
+    """
+    import ehtim as eh
+
+    sky = {**SGRA, **sky}
+    fov = fov_uas * eh.RADPERUAS
+    times = np.linspace(tstart_hr, tstop_hr, num_frames)
+    sign = -1.0 if str(direction).upper() == "CW" else 1.0
+    mring_flux = total_flux - hs_flux
+
+    frames = []
+    for t in times:
+        angle = np.deg2rad(phase0_deg) + sign * 2 * np.pi * (t - tstart_hr) * 60.0 / period_min
+        model = eh.model.Model(ra=sky["ra"], dec=sky["dec"], rf=sky["rf"], source=source)
+        im = model.add_thick_mring(
+            F0=mring_flux,
+            d=diameter_uas * eh.RADPERUAS,
+            alpha=alpha_uas * eh.RADPERUAS,
+            x0=0.0,
+            y0=0.0,
+            beta_list=[beta1_abs * np.exp(-1j * np.deg2rad(-pa_deg))],
+        ).make_image(fov, npix)
+        im.mjd = sky["mjd"]
+        _add_twisty_pol(im, linpol_frac, circpol_frac)
+        r = ring_radius_uas * eh.RADPERUAS
+        im = im.add_gauss(
+            hs_flux,
+            [hs_fwhm_uas * eh.RADPERUAS, hs_fwhm_uas * eh.RADPERUAS, 0.0,
+             r * np.cos(angle), r * np.sin(angle)],
+            pol=None,
+        )
+        im.time = float(t)
+        frames.append(im)
+
+    return eh.movie.merge_im_list(frames, interp="linear", bounds_error=True)
+
+
 def to_ehtim_movie(frames, times, fov_uas=200.0, source="SgrA", qframes=None, uframes=None, **sky):
     """Wrap ``(T, H, W)`` frames into an ehtim Movie (requires ehtim).
 

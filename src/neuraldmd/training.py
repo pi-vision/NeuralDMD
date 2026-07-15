@@ -138,7 +138,7 @@ def make_polarized_optimizer(
     weight_decay : float
         Decoupled weight decay (``adamw`` only).
     optimizer : {"adamw", "adam", "adamax"}
-        Update rule; ``"adamax"`` matches the KINE imaging setup.
+        Update rule (``"adamax"`` is often more robust for imaging fields).
     lr_decay_rate : float
         If < 1.0, use ``optax.exponential_decay(initial_lr, lr_decay_steps,
         lr_decay_rate)`` (per-step annealing); 1.0 keeps the LR constant.

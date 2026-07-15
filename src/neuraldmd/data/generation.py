@@ -623,16 +623,14 @@ def generate(cfg: Config):
 def generate_polarized_dataset(
     out_dir,
     *,
-    npix: int = 32,
+    npix: int = 50,
     fov_uas: float = 200.0,
     num_frames: int = 64,
     tstart_hr: float = 9.0,
     tstop_hr: float = 15.0,
     tint: float = 30.0,
     bw: float = 2.0e9,
-    frac_pol: float = 0.3,
-    evpa_winding: int = 1,
-    evpa_offset_deg: float = 0.0,
+    linpol_frac: float = 0.2,
     fractional_noise: float = 0.04,
     ampcal: bool = True,
     phasecal: bool = True,
@@ -643,38 +641,42 @@ def generate_polarized_dataset(
     ttype: str = "direct",
     seed: int = 42,
     save_truth: bool = True,
-    spot_kwargs: dict | None = None,
+    **mring_kwargs,
 ):
-    """Generate a polarized synthetic dataset end-to-end and write a v2 obs_dir.
+    """Generate the canonical polarized ``mring+hsCW`` dataset and write a v2 obs_dir.
 
-    Pipeline: synthesize a polarized m-ring + hot-spot movie
-    (:func:`neuraldmd.data.movies.make_polarized_frames`) at the model grid,
-    observe it with the EHT array (``Movie.observe``, Stokes polrep, thermal +
-    optional fractional noise), save ``obs.uvfits``, then ingest via
-    :func:`load_uvfits_to_products` in the requested ``basis`` and write the
-    obs_dir (shared A + per-key products). Requires ehtim.
+    Pipeline: build the polarized m-ring + hot-spot movie
+    (:func:`neuraldmd.data.movies.make_mring_hs_pol_movie`, an ehtim thick m-ring
+    with radial-EVPA polarization and an orbiting hot spot) at the model grid,
+    observe it with the EHT array (Stokes polrep, thermal + optional fractional
+    noise), save ``obs.uvfits``, ingest via :func:`load_uvfits_to_products` in the
+    requested ``basis``, and write the obs_dir. Requires ehtim.
 
     Parameters
     ----------
     out_dir : str or pathlib.Path
-        Output directory (obs_dir + ``obs.uvfits``).
-    npix, fov_uas, num_frames, tstart_hr, tstop_hr : see the movie synthesizer.
-    tint, bw : float
-        Integration time [s] and bandwidth [Hz] for the observation.
-    frac_pol, evpa_winding, evpa_offset_deg : polarization-field parameters.
+        Output directory (obs_dir + ``obs.uvfits`` + ``truth_pol.npz``).
+    npix, fov_uas, num_frames, tstart_hr, tstop_hr, tint, bw
+        Image grid, field of view, sampling, integration time [s], bandwidth [Hz].
+    linpol_frac : float
+        Fractional linear polarization of the ring.
     fractional_noise : float
         Fractional systematic noise added in quadrature (0 disables).
     ampcal, phasecal : bool
         If False, ehtim injects amplitude/phase gain errors (for later cal work).
     array_name, array_dir : str, path
-        Telescope array (``<array_dir>/<array_name>.txt``; defaults to the packaged EHT2017).
-    stokes, basis, products : passed to :func:`load_uvfits_to_products`.
+        Telescope array (defaults to the packaged EHT2017).
+    stokes, basis : passed to :func:`load_uvfits_to_products`.
     ttype : str
         ehtim Fourier type; ``"direct"`` gives the dense operator the loader needs.
     seed : int
-        Observation noise seed (reproducible dataset).
-    spot_kwargs : dict or None
-        Extra m-ring / hot-spot geometry overrides.
+        Observation noise seed.
+    save_truth : bool
+        Save ``truth_pol.npz`` (I, Q, U cubes + normalized frame times).
+    **mring_kwargs
+        m-ring / hot-spot / polarization overrides for
+        :func:`make_mring_hs_pol_movie` (``diameter_uas``, ``alpha_uas``,
+        ``beta1_abs``, ``period_min``, ``direction``, ``circpol_frac``, ...).
 
     Returns
     -------
@@ -683,7 +685,7 @@ def generate_polarized_dataset(
     """
     import ehtim as eh
 
-    from .movies import make_polarized_frames, to_ehtim_movie
+    from .movies import make_mring_hs_pol_movie
     from .observations import load_uvfits_to_products
 
     out_dir = Path(out_dir)
@@ -691,18 +693,15 @@ def generate_polarized_dataset(
     array_dir = Path(array_dir) if array_dir is not None else Path(__file__).parent / "arrays"
     array = eh.array.load_txt(str(array_dir / f"{array_name}.txt"))
 
-    intensity, q, u, times = make_polarized_frames(
+    movie = make_mring_hs_pol_movie(
+        npix=npix,
+        fov_uas=fov_uas,
         num_frames=num_frames,
         tstart_hr=tstart_hr,
         tstop_hr=tstop_hr,
-        npix=npix,
-        fov_uas=fov_uas,
-        frac_pol=frac_pol,
-        evpa_winding=evpa_winding,
-        evpa_offset_deg=evpa_offset_deg,
-        **(spot_kwargs or {}),
+        linpol_frac=linpol_frac,
+        **mring_kwargs,
     )
-    movie = to_ehtim_movie(intensity, times, fov_uas=fov_uas, qframes=q, uframes=u)
 
     tadv = float((tstop_hr - tstart_hr) * 3600.0 / max(num_frames - 1, 1))
     obs = movie.observe(
@@ -722,14 +721,24 @@ def generate_polarized_dataset(
     op.to_obs_dir(out_dir)
 
     if save_truth:
-        # ground-truth Stokes cubes (T, npix, npix) for reconstruction metrics,
-        # with normalized [0, 1] frame times matching the loader default.
+        # ground-truth Stokes cubes (T, npix, npix) from the movie frames, with
+        # normalized [0, 1] frame times matching the loader default.
+        ims = movie.im_list()
+
+        def _cube(attr):
+            return np.stack(
+                [np.asarray(getattr(im, attr)).reshape(npix, npix) for im in ims]
+            ).astype(np.float32)
+
+        mtimes = np.array([float(im.time) for im in ims])
+        span = float(mtimes.max() - mtimes.min())
+        tnorm = (mtimes - mtimes.min()) / (span if span > 0 else 1.0)
         np.savez(
             out_dir / "truth_pol.npz",
-            I=intensity.astype(np.float32),
-            Q=q.astype(np.float32),
-            U=u.astype(np.float32),
-            times=np.linspace(0.0, 1.0, len(times)).astype(np.float32),
+            I=_cube("imvec"),
+            Q=_cube("qvec"),
+            U=_cube("uvec"),
+            times=tnorm.astype(np.float32),
             npix=npix,
             fov_uas=fov_uas,
         )

@@ -24,7 +24,7 @@ def parse_args():
     ap.add_argument("--npix", type=int, default=50)
     ap.add_argument("--num-frames", type=int, default=64)
     ap.add_argument("--fov-uas", type=float, default=200.0)
-    ap.add_argument("--frac-pol", type=float, default=0.3)
+    ap.add_argument("--frac-pol", type=float, default=0.2, help="ring linear pol fraction")
     ap.add_argument("--epochs", type=int, default=8000)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--r", type=int, default=8, help="Number of complex DMD modes per Stokes")
@@ -74,7 +74,7 @@ def main():
         print("Generating polarized dataset ...", flush=True)
         op = generate_polarized_dataset(
             data_dir, npix=args.npix, fov_uas=args.fov_uas, num_frames=args.num_frames,
-            frac_pol=args.frac_pol, stokes=stokes, basis=args.basis, seed=args.seed,
+            linpol_frac=args.frac_pol, stokes=stokes, basis=args.basis, seed=args.seed,
         )
     print(f"Dataset keys={op.stokes}  A={op.A.shape}", flush=True)
 

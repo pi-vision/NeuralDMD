@@ -343,8 +343,9 @@ def plot_polarized_summary(recon, truth, path, frame=None):
     plt.close(fig)
 
 
-def make_polarized_gif(cubes, path, fps=10, cmap="inferno", pmin_frac=0.2):
-    """Animate a polarized reconstruction: per-frame Stokes I with EVPA ticks.
+def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", pmin_frac=0.1):
+    """Animate a polarized reconstruction: per-frame Stokes I with EVPA
+    line-segment ticks colored by linear-polarization fraction.
 
     Parameters
     ----------
@@ -365,7 +366,8 @@ def make_polarized_gif(cubes, path, fps=10, cmap="inferno", pmin_frac=0.2):
     q = np.asarray(cubes["Q"]) if "Q" in cubes else None
     u = np.asarray(cubes["U"]) if "U" in cubes else None
     n_t, n, _ = intensity.shape
-    step = max(1, n // 16)
+    step = max(1, n // 20)
+    sub = (slice(None, None, step), slice(None, None, step))
     vmax = float(intensity.max()) or 1.0
 
     frames = []
@@ -375,12 +377,15 @@ def make_polarized_gif(cubes, path, fps=10, cmap="inferno", pmin_frac=0.2):
         if q is not None and u is not None:
             p = linear_polarized_intensity(q[t], u[t])
             chi = evpa(q[t], u[t])
+            frac = p / (np.abs(intensity[t]) + 1e-8)  # fractional pol -> tick color
             ys, xs = np.mgrid[0:n:step, 0:n:step]
-            sel = p[::step, ::step] > pmin_frac * (p.max() or 1.0)
+            sel = p[sub] > pmin_frac * (p.max() or 1.0)
+            # EVPA line segments (no arrowheads) colored by pol fraction
             ax.quiver(
                 xs[sel], ys[sel],
-                np.cos(chi[::step, ::step])[sel], np.sin(chi[::step, ::step])[sel],
-                color="cyan", pivot="mid", headwidth=0, headlength=0, scale=25,
+                np.cos(chi[sub])[sel], np.sin(chi[sub])[sel], frac[sub][sel],
+                cmap="viridis", pivot="mid", headwidth=0, headlength=0,
+                headaxislength=0, scale=22, width=0.006,
             )
         ax.axis("off")
         fig.canvas.draw()
