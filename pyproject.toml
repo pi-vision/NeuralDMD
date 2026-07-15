@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=65.7", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuraldmd"
+description = "Neural Dynamic Mode Decomposition for sparse-visibility (EHT) black-hole imaging, with polarization and calibration."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["version"]
+dependencies = [
+    "jax>=0.4.30",
+    "jaxlib>=0.4.30",
+    "equinox>=0.11",
+    "optax>=0.2",
+    "numpy>=1.26",
+    "h5py",
+    "matplotlib",
+    "imageio",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# Heavy / optional: interferometry data handling (kept out of the core wheel).
+data = ["ehtim", "astropy", "scikit-image", "finufft"]
+test = ["pytest>=8", "pytest-cov"]
+dev = [
+    "neuraldmd[test]",
+    "ruff>=0.6",
+    "pre-commit",
+    "ipykernel",
+    "jupyter",
+    "nbconvert",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["neuraldmd*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "neuraldmd.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "slow: long-running (multi-second) tests, deselect with -m 'not slow'",
+    "ehtim: requires the ehtim/interferometry stack ([data] extra)",
+    "gpu: requires a CUDA GPU",
+    "acceptance: end-to-end recovery harnesses (heavy)",
+]
+
+[tool.ruff]
+line-length = 100
+# Legacy tutorial/eht2017 code is linted only once packaged (Phase 2+).
+extend-exclude = ["tutorial", "eht2017", "docs", "slurm"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["E741"]  # ambiguous var names (l) appear in ported math
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # sys.path manipulation before imports in the impl shim

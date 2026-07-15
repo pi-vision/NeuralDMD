@@ -222,3 +222,6 @@ tutorial/Fourier/data/
 tutorial/Fourier/models/
 tutorial/Fourier/plots/
 eht2017/data/
+
+# Cluster-local SLURM scripts (never pushed to the shared repo)
+slurm/
