@@ -104,8 +104,122 @@ def make_frames(
     return frames, times
 
 
-def to_ehtim_movie(frames, times, fov_uas=200.0, source="SgrA", **sky):
-    """Wrap (T, H, W) frames into an ehtim Movie (requires ehtim)."""
+def polarization_maps(
+    npix=200,
+    fov_uas=200.0,
+    frac_pol=0.3,
+    evpa_winding=1,
+    evpa_offset_deg=0.0,
+):
+    """Static fractional-polarization and EVPA maps for the polarized test movie.
+
+    The linear-polarization pattern is fixed in the sky plane; it multiplies the
+    time-varying Stokes I of each frame. The electric-vector position angle winds
+    azimuthally, ``chi = evpa_winding * phi + offset`` (a smooth spiral), and the
+    fractional polarization ``m`` is uniform -- a simple, exactly recoverable
+    truth for which ``sqrt(Q^2 + U^2) / I = m`` and ``0.5 * atan2(U, Q) = chi``.
+
+    Parameters
+    ----------
+    npix : int
+        Grid side length.
+    fov_uas : float
+        Field of view [uas].
+    frac_pol : float
+        Uniform linear fractional polarization ``m``, in ``[0, 1]``.
+    evpa_winding : int
+        Number of EVPA turns around the ring (1 = one full rotation).
+    evpa_offset_deg : float
+        Constant EVPA offset [degrees].
+
+    Returns
+    -------
+    m, chi : numpy.ndarray
+        Two ``(npix, npix)`` arrays: fractional polarization and EVPA [radians].
+    """
+    X, Y = _grid(npix, fov_uas)
+    phi = np.arctan2(Y, X)
+    m = np.full((npix, npix), float(frac_pol))
+    chi = evpa_winding * phi + np.deg2rad(evpa_offset_deg)
+    return m, chi
+
+
+def make_polarized_frames(
+    num_frames=411,
+    tstart_hr=9.0,
+    tstop_hr=15.0,
+    npix=200,
+    fov_uas=200.0,
+    frac_pol=0.3,
+    evpa_winding=1,
+    evpa_offset_deg=0.0,
+    **kwargs,
+):
+    """Polarized m-ring + hot-spot movie in Stokes (I, Q, U); V = 0.
+
+    Stokes I comes from :func:`make_frames`; a static polarization field
+    (:func:`polarization_maps`) then gives, per frame, ``Q = m * I * cos(2*chi)``
+    and ``U = m * I * sin(2*chi)`` (EVPA ``chi = 0.5*atan2(U, Q)``, matching
+    :func:`neuraldmd.physics.stokes.evpa`). V is identically zero and not returned.
+
+    Parameters
+    ----------
+    num_frames, tstart_hr, tstop_hr, npix, fov_uas
+        Movie sampling and grid, as in :func:`make_frames`.
+    frac_pol, evpa_winding, evpa_offset_deg
+        Polarization-field parameters (see :func:`polarization_maps`).
+    **kwargs
+        Forwarded to :func:`make_frames` (m-ring / hot-spot geometry).
+
+    Returns
+    -------
+    I, Q, U, times : numpy.ndarray
+        ``I``, ``Q``, ``U`` each ``(T, npix, npix)``; ``times`` ``(T,)`` [hours].
+    """
+    intensity, times = make_frames(
+        num_frames=num_frames,
+        tstart_hr=tstart_hr,
+        tstop_hr=tstop_hr,
+        npix=npix,
+        fov_uas=fov_uas,
+        **kwargs,
+    )
+    m, chi = polarization_maps(
+        npix=npix,
+        fov_uas=fov_uas,
+        frac_pol=frac_pol,
+        evpa_winding=evpa_winding,
+        evpa_offset_deg=evpa_offset_deg,
+    )
+    q = m * intensity * np.cos(2 * chi)
+    u = m * intensity * np.sin(2 * chi)
+    return intensity, q, u, times
+
+
+def to_ehtim_movie(frames, times, fov_uas=200.0, source="SgrA", qframes=None, uframes=None, **sky):
+    """Wrap ``(T, H, W)`` frames into an ehtim Movie (requires ehtim).
+
+    Parameters
+    ----------
+    frames : numpy.ndarray
+        Stokes-I frames of shape ``(T, H, W)``.
+    times : numpy.ndarray
+        Frame times [hours], length ``T``.
+    fov_uas : float
+        Field of view [uas].
+    source : str
+        Source name stored on each ehtim Image.
+    qframes, uframes : numpy.ndarray or None
+        Optional Stokes Q and U frames ``(T, H, W)``. When both are given, each
+        Image carries its linear polarization via ``ehtim.image.Image.add_qu``.
+    **sky
+        Overrides for the sky metadata (``ra``/``dec``/``rf``/``mjd``).
+
+    Returns
+    -------
+    ehtim.movie.Movie
+        Movie assembled from the per-frame ehtim Images.
+    """
     import ehtim as eh
 
     sky = {**SGRA, **sky}
@@ -124,6 +238,8 @@ def to_ehtim_movie(frames, times, fov_uas=200.0, source="SgrA", **sky):
             source=source,
         )
         im.time = float(t)
+        if qframes is not None and uframes is not None:
+            im.add_qu(qframes[i], uframes[i])
         imlist.append(im)
 
     return eh.movie.merge_im_list(imlist)
