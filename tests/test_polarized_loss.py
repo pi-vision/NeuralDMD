@@ -137,12 +137,12 @@ _PRODUCTS = ("RR", "LL", "RL", "LR")
 
 def _model_products(pol, d, fmax, fmin, products=_PRODUCTS):
     """Independently recompute the modeled correlation-product visibilities."""
-    from neuraldmd.losses import _physical_intensities
+    from neuraldmd.model import physical_intensities
     from neuraldmd.physics.stokes import stokes_to_products_matrix
 
     vis = {}
     for s in pol.stokes:
-        img, _ = _physical_intensities(pol.models[s], d["xy"], d["ti"], fmax[s], fmin[s])
+        img, _ = physical_intensities(pol.models[s], d["xy"], d["ti"], fmax[s], fmin[s])
         vis[s] = np.einsum("tvp,pt->tv", np.asarray(d["A"]), np.asarray(img).astype(np.complex64))
     m = stokes_to_products_matrix(tuple(products), pol.stokes)
     out = {}

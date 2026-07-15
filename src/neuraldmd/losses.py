@@ -101,38 +101,6 @@ def loss_fn(
     return total, (reconstruction_loss, chi2_vis, chi2_amp, chi2_cp)
 
 
-def _physical_intensities(model, xy, time_indices, frame_max, frame_min):
-    """Reconstruct one scalar model's physical-unit intensities and mode arrays.
-
-    Mirrors the inline reconstruction in :func:`loss_fn` exactly (so the
-    Stokes-I path is bit-identical).
-
-    Parameters
-    ----------
-    model : NeuralDMD
-        A single scalar model.
-    xy : jax.Array
-        ``(P, 2)`` pixel coordinates.
-    time_indices : jax.Array
-        ``(T,)`` normalized times of the frame batch.
-    frame_max, frame_min : float
-        Output scaling ``intensities * (frame_max - frame_min) + frame_min``.
-
-    Returns
-    -------
-    intensities : jax.Array
-        ``(P, T)`` physical-unit intensities.
-    modes : tuple
-        ``(W0, W, b0, b)`` for the sparsity penalties.
-    """
-    W0, W, Omega, b0, b = model(xy)
-    lambda_exp = jnp.exp(Omega[:, None] * time_indices[None, :] * model.t_scale)
-    i_stat = W0[:, 0:1] * b0[0]
-    i_dyn = 2 * jnp.real(jnp.einsum("pr,rt,r->pt", W, lambda_exp, b))
-    intensities = (i_stat + i_dyn) * (frame_max - frame_min) + frame_min
-    return intensities, (W0, W, b0, b)
-
-
 def _vis_chi2(vis_pred, target, sigma, mask):
     """Reduced complex-visibility chi-squared (per real dof: divide by 2*sum(mask))."""
     diff2 = jnp.abs(vis_pred - target) ** 2
@@ -213,18 +181,16 @@ def polarized_loss_fn(
         ``{"chi2_vis": {key: value}, "neg_I": value, "p_penalty": value,
         "basis": basis}`` -- ``chi2_vis`` keyed by Stokes or product per ``basis``.
     """
-    phys: dict[str, jax.Array] = {}
-    vis_stokes: dict[str, jax.Array] = {}
+    images, modes = model.stokes_fields(xy, time_indices, frame_max, frame_min)
+    vis_stokes = {
+        s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64))
+        for s in model.stokes
+    }
     sparse_total = 0.0
-    for s in model.stokes:
-        intensities, (W0, W, b0, b) = _physical_intensities(
-            model.models[s], xy, time_indices, frame_max[s], frame_min[s]
-        )
-        phys[s] = intensities
-        vis_stokes[s] = jnp.einsum("tvp,pt->tv", A_batch, intensities.astype(jnp.complex64))
+    for w0, w, b0, b in modes:
         sparse_total = (
             sparse_total
-            + w_sparse_weight * sparsity_loss(W0, W)
+            + w_sparse_weight * sparsity_loss(w0, w)
             + b_sparse_weight * sparsity_loss(b0, b)
         )
 
@@ -242,12 +208,12 @@ def polarized_loss_fn(
     else:
         raise ValueError(f"basis must be 'stokes' or 'circular', got {basis!r}")
 
-    neg_i = jnp.sum(jax.nn.relu(-phys["I"]) ** 2)  # negativity: Stokes I only
+    neg_i = jnp.sum(jax.nn.relu(-images["I"]) ** 2)  # negativity: Stokes I only
 
     pol = [s for s in model.stokes if s in ("Q", "U", "V")]
     if p_le_i_weight and pol:
-        p_sq = sum(phys[s] ** 2 for s in pol)
-        p_penalty = jnp.sum(jax.nn.relu(jnp.sqrt(p_sq) - phys["I"]) ** 2)
+        p_sq = sum(images[s] ** 2 for s in pol)
+        p_penalty = jnp.sum(jax.nn.relu(jnp.sqrt(p_sq) - images["I"]) ** 2)
     else:
         p_penalty = jnp.asarray(0.0)
 

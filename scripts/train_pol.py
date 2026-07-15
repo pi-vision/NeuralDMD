@@ -38,10 +38,14 @@ def parse_args():
     ap.add_argument("--no-pretrain", action="store_true", help="Skip the Stokes-I pretrain")
     ap.add_argument("--pretrain-steps", type=int, default=2000)
     ap.add_argument("--pretrain-lr", type=float, default=1e-4)
-    # optimizer / LR schedule (KINE-style annealing when decay-rate < 1)
+    # optimizer / LR schedule (exponential annealing when decay-rate < 1)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam", "adamax"])
     ap.add_argument("--lr-decay-rate", type=float, default=1.0, help="<1 enables exp decay")
     ap.add_argument("--lr-decay-steps", type=int, default=2000)
+    # polarized model: fractional (pol tied to I, P<=I) vs independent per-Stokes
+    ap.add_argument("--pol-model", default="fractional", choices=["fractional", "independent"])
+    ap.add_argument("--scaling-ml", type=float, default=1.0, help="Cap on linear pol fraction")
+    ap.add_argument("--outshift", type=float, default=10.0, help="Sigmoid bias -> unpolarized init")
     return ap.parse_args()
 
 
@@ -52,7 +56,7 @@ def main():
     from neuraldmd.data.loader import PolarizedDMDDataLoader
     from neuraldmd.data.movies import save_movie_hdf5, to_ehtim_movie
     from neuraldmd.data.observations import ObsProducts
-    from neuraldmd.polarized import PolarizedNeuralDMD
+    from neuraldmd.polarized import FractionalPolNeuralDMD, PolarizedNeuralDMD
     from neuraldmd.pretraining import pretrain_stokes_i
     from neuraldmd.training import train_polarized_model
 
@@ -85,10 +89,14 @@ def main():
     loader = PolarizedDMDDataLoader(
         op, npix=args.npix, batch_size=args.batch_size, epochs=args.epochs, fov_x=np.pi, fov_y=np.pi
     )
-    model = PolarizedNeuralDMD(
-        stokes, r=args.r, key=jax.random.PRNGKey(args.seed),
-        hidden_size=args.hidden_size, num_layers=args.num_layers,
-    )
+    net_kw = dict(hidden_size=args.hidden_size, num_layers=args.num_layers)
+    if args.pol_model == "fractional":
+        model = FractionalPolNeuralDMD(
+            stokes, r=args.r, key=jax.random.PRNGKey(args.seed),
+            outshift=args.outshift, scaling_ml=args.scaling_ml, **net_kw,
+        )
+    else:
+        model = PolarizedNeuralDMD(stokes, r=args.r, key=jax.random.PRNGKey(args.seed), **net_kw)
 
     if not args.no_pretrain:
         print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
@@ -121,6 +129,13 @@ def main():
         save_movie_hdf5(recon_movie, str(out / "recon_pol.hdf5"))
     except Exception as exc:
         print(f"[warn] reconstruction hdf5 export failed: {exc}", flush=True)
+
+    # animated GIFs (reconstruction + truth) with EVPA ticks
+    try:
+        ev.make_polarized_gif(recon, str(out / "recon_pol.gif"))
+        ev.make_polarized_gif(truth_cubes, str(out / "truth_pol.gif"))
+    except Exception as exc:
+        print(f"[warn] gif export failed: {exc}", flush=True)
 
     final_chi2 = {k: hist["chi2"][k][-1] for k in loader.keys}
     metrics = {

@@ -269,11 +269,8 @@ def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=
     """
     xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
     times = jnp.asarray(np.asarray(times, dtype=np.float32))
-    cubes = {}
-    for s in model.stokes:
-        intensities, _, _ = model.models[s].reconstruct(xy, times, frame_max[s], frame_min[s])
-        cubes[s] = np.asarray(intensities).T.reshape(len(times), npix, npix)
-    return cubes
+    images, _ = model.stokes_fields(xy, times, frame_max, frame_min)
+    return {s: np.asarray(images[s]).T.reshape(len(times), npix, npix) for s in images}
 
 
 def polarized_nrmse(recon, truth):
@@ -344,3 +341,51 @@ def plot_polarized_summary(recon, truth, path, frame=None):
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def make_polarized_gif(cubes, path, fps=10, cmap="inferno", pmin_frac=0.2):
+    """Animate a polarized reconstruction: per-frame Stokes I with EVPA ticks.
+
+    Parameters
+    ----------
+    cubes : dict of str -> numpy.ndarray
+        ``{"I": (T, H, W), "Q": ..., "U": ...}`` reconstruction (or truth).
+    path : str
+        Output GIF path.
+    fps : int
+        Frames per second.
+    cmap : str
+        Colormap for Stokes I.
+    pmin_frac : float
+        Only draw EVPA ticks where ``P > pmin_frac * P.max()``.
+    """
+    from .physics.stokes import evpa, linear_polarized_intensity
+
+    intensity = np.asarray(cubes["I"])
+    q = np.asarray(cubes["Q"]) if "Q" in cubes else None
+    u = np.asarray(cubes["U"]) if "U" in cubes else None
+    n_t, n, _ = intensity.shape
+    step = max(1, n // 16)
+    vmax = float(intensity.max()) or 1.0
+
+    frames = []
+    for t in range(n_t):
+        fig, ax = plt.subplots(figsize=(4, 4), dpi=100)
+        ax.imshow(intensity[t], cmap=cmap, origin="lower", vmin=0.0, vmax=vmax)
+        if q is not None and u is not None:
+            p = linear_polarized_intensity(q[t], u[t])
+            chi = evpa(q[t], u[t])
+            ys, xs = np.mgrid[0:n:step, 0:n:step]
+            sel = p[::step, ::step] > pmin_frac * (p.max() or 1.0)
+            ax.quiver(
+                xs[sel], ys[sel],
+                np.cos(chi[::step, ::step])[sel], np.sin(chi[::step, ::step])[sel],
+                color="cyan", pivot="mid", headwidth=0, headlength=0, scale=25,
+            )
+        ax.axis("off")
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
+    print(f"Saved {path}")

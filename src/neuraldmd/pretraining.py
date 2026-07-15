@@ -166,7 +166,7 @@ def pretrain_stokes_i(
     losses : list of float
         Alignment-loss history.
     """
-    model_i = polarized_model.models["I"]
+    model_i = polarized_model.i_submodel
     _, height, width = np.asarray(truth_i).shape
     r_g, _ = radius_of_gyration(truth_i, fov_x=fov, fov_y=fov)
     z_targets, _picked, _mask, xy = build_zernike_targets(
@@ -174,8 +174,7 @@ def pretrain_stokes_i(
         max_n=max_n, prefer_ms=(0, 1, 2, 3),
     )
     trained_i, losses = pretrain_model(model_i, xy, z_targets, num_steps=num_steps, lr=lr, key=key)
-    model = eqx.tree_at(lambda m: m.models["I"], polarized_model, trained_i)
-    return model, losses
+    return polarized_model.replace_i_submodel(trained_i), losses
 
 
 def save_template(model, models_dir):
