@@ -9,6 +9,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from .physics.stokes import stokes_to_products_matrix
+
 
 def sparsity_loss(W0: jax.Array, W: jax.Array) -> jax.Array:
     """L1 penalty encouraging sparse spatial modes / amplitudes."""
@@ -131,31 +133,51 @@ def _physical_intensities(model, xy, time_indices, frame_max, frame_min):
     return intensities, (W0, W, b0, b)
 
 
+def _vis_chi2(vis_pred, target, sigma, mask):
+    """Reduced complex-visibility chi-squared (per real dof: divide by 2*sum(mask))."""
+    diff2 = jnp.abs(vis_pred - target) ** 2
+    return jnp.sum(diff2 * mask / sigma**2) / (2.0 * jnp.sum(mask))
+
+
 def polarized_loss_fn(
     model,
     xy,
-    vis_target: dict,
-    vis_sigma: dict,
-    vis_mask: dict,
+    targets: dict,
+    sigmas: dict,
+    masks: dict,
     A_batch,
     time_indices,
     frame_max: dict,
     frame_min: dict,
+    *,
+    basis: str = "stokes",
+    products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
 ):
-    """Per-Stokes visibility chi-squared for a :class:`PolarizedNeuralDMD`.
+    """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
-    The gradient-driving loss is the sum of per-Stokes reduced chi-squared (equal
-    weights, each divided by ``2 * sum(mask)`` as in :func:`loss_fn`), plus a
-    negativity penalty applied to **Stokes I only** (Q, U, V are signed), per-net
-    sparsity, and an optional soft ``P <= I`` penalty (default off). Closure/amp
-    diagnostics live in :func:`loss_fn` / evaluation and are not recomputed here.
+    The gradient-driving term is a sum of reduced chi-squared, each divided by
+    ``2 * sum(mask)`` as in :func:`loss_fn`, plus a negativity penalty on **Stokes
+    I only** (Q, U, V are signed), per-net sparsity, and an optional soft
+    ``P <= I`` penalty (default off). These image-domain penalties do not depend
+    on the fidelity basis.
 
-    With ``model.stokes == ("I",)`` and matching weights/scaling this returns
-    exactly the :func:`loss_fn` total (parity gate in ``tests/test_polarized_loss.py``).
+    Two fidelity bases:
+
+    * ``basis="stokes"`` -- chi-squared of each modeled Stokes visibility against
+      the corresponding Stokes target. Simple; assumes the data were converted to
+      Stokes visibilities (which correlates the per-hand thermal noise).
+    * ``basis="circular"`` -- the modeled Stokes visibilities are combined into
+      correlation products (default RR, LL, RL, LR) via
+      :func:`neuraldmd.physics.stokes.stokes_to_products_matrix`, and chi-squared
+      is taken against the native product data with their independent per-hand
+      sigma. This is the noise-faithful comparison for real interferometric data.
+
+    With ``model.stokes == ("I",)``, ``basis="stokes"``, and matching
+    weights/scaling this returns exactly the :func:`loss_fn` total (parity gate).
 
     Parameters
     ----------
@@ -163,8 +185,9 @@ def polarized_loss_fn(
         The polarized container.
     xy : jax.Array
         ``(P, 2)`` pixel coordinates.
-    vis_target, vis_sigma, vis_mask : dict of str -> jax.Array
-        Per-Stokes visibility targets, 1-sigma errors, and 0/1 masks, each ``(T, V)``.
+    targets, sigmas, masks : dict of str -> jax.Array
+        Visibility targets, 1-sigma errors, and 0/1 masks, each ``(T, V)``. Keyed
+        by Stokes for ``basis="stokes"`` and by product for ``basis="circular"``.
     A_batch : jax.Array
         ``(T, V, P)`` image->visibility operator (shared across Stokes).
     time_indices : jax.Array
@@ -172,37 +195,52 @@ def polarized_loss_fn(
     frame_max, frame_min : dict of str -> float
         Per-Stokes output scaling (Stokes I uses the physical intensity range;
         signed Stokes typically use ``frame_min = 0`` with a symmetric ``frame_max``).
+    basis : {"stokes", "circular"}
+        Fidelity basis (see above).
+    products : tuple of str
+        Correlation products for ``basis="circular"`` (default RR, LL, RL, LR).
     neg_weight, w_sparse_weight, b_sparse_weight : float
         Weights for the I-negativity and per-net sparsity penalties.
     p_le_i_weight : float
         Weight for the optional ``sum(relu(sqrt(Q^2+U^2+V^2) - I)^2)`` penalty
-        (default 0.0 -> disabled; no effect on Stokes-I-only parity).
+        (default 0.0 -> disabled).
 
     Returns
     -------
     total : jax.Array
         Scalar loss.
     aux : dict
-        ``{"chi2_vis": {stokes: value}, "neg_I": value, "p_penalty": value}``.
+        ``{"chi2_vis": {key: value}, "neg_I": value, "p_penalty": value,
+        "basis": basis}`` -- ``chi2_vis`` keyed by Stokes or product per ``basis``.
     """
-    chi2: dict[str, jax.Array] = {}
     phys: dict[str, jax.Array] = {}
+    vis_stokes: dict[str, jax.Array] = {}
     sparse_total = 0.0
     for s in model.stokes:
         intensities, (W0, W, b0, b) = _physical_intensities(
             model.models[s], xy, time_indices, frame_max[s], frame_min[s]
         )
         phys[s] = intensities
-        vis_pred = jnp.einsum("tvp,pt->tv", A_batch, intensities.astype(jnp.complex64))
-        vis_diff = jnp.abs(vis_pred - vis_target[s])
-        chi2[s] = jnp.sum(vis_diff**2 * vis_mask[s] / vis_sigma[s] ** 2) / (
-            2.0 * jnp.sum(vis_mask[s])
-        )
+        vis_stokes[s] = jnp.einsum("tvp,pt->tv", A_batch, intensities.astype(jnp.complex64))
         sparse_total = (
             sparse_total
             + w_sparse_weight * sparsity_loss(W0, W)
             + b_sparse_weight * sparsity_loss(b0, b)
         )
+
+    if basis == "stokes":
+        chi2 = {s: _vis_chi2(vis_stokes[s], targets[s], sigmas[s], masks[s]) for s in model.stokes}
+    elif basis == "circular":
+        # constant (products, model.stokes are static) -> folded at trace time
+        m_mat = jnp.asarray(
+            stokes_to_products_matrix(tuple(products), model.stokes), dtype=jnp.complex64
+        )
+        chi2 = {}
+        for i, p in enumerate(products):
+            vis_p = sum(m_mat[i, j] * vis_stokes[s] for j, s in enumerate(model.stokes))
+            chi2[p] = _vis_chi2(vis_p, targets[p], sigmas[p], masks[p])
+    else:
+        raise ValueError(f"basis must be 'stokes' or 'circular', got {basis!r}")
 
     neg_i = jnp.sum(jax.nn.relu(-phys["I"]) ** 2)  # negativity: Stokes I only
 
@@ -214,4 +252,4 @@ def polarized_loss_fn(
         p_penalty = jnp.asarray(0.0)
 
     total = sum(chi2.values()) + neg_weight * neg_i + p_le_i_weight * p_penalty + sparse_total
-    return total, {"chi2_vis": chi2, "neg_I": neg_i, "p_penalty": p_penalty}
+    return total, {"chi2_vis": chi2, "neg_I": neg_i, "p_penalty": p_penalty, "basis": basis}
