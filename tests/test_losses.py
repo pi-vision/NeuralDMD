@@ -15,7 +15,9 @@ def _model(r=3):
 
 
 def _batch(tobs, tb=3):
-    g = lambda a: jnp.asarray(a[:tb])
+    def g(a):
+        return jnp.asarray(a[:tb])
+
     frames = jnp.asarray(tobs.movie[:tb].reshape(tb, tobs.P))
     return dict(
         frame_batch=frames,

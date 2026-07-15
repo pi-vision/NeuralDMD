@@ -16,12 +16,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
+      - uses: actions/setup-python@v5
         with:
-          args: check
-      - uses: astral-sh/ruff-action@v3
-        with:
-          args: format --check
+          python-version: "3.12"
+          cache: pip
+      - run: pip install "ruff==0.15.21"
+      - run: ruff check .
+      - run: ruff format --check .
 
   test-core:
     # fast tier: numpy-only tests against the current implementation, latest jax
