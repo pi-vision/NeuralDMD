@@ -32,6 +32,13 @@ def parse_args():
     ap.add_argument("--basis", default="circular", choices=["stokes", "circular"])
     ap.add_argument("--hidden-size", type=int, default=256)
     ap.add_argument("--num-layers", type=int, default=4)
+    ap.add_argument(
+        "--theta-max",
+        type=float,
+        default=1.0,
+        help="cap on temporal mode frequency (x t_scale=200 rad over the window); set "
+        "below the scan Nyquist to prevent inter-scan flux ringing",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reuse-data", action="store_true", help="Reuse an existing data/ obs_dir")
     # Stokes-I disk-template pretraining (image prior)
@@ -179,6 +186,7 @@ def main():
         pol_model_kwargs=pol_kwargs or None,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
+        theta_max=args.theta_max,
     )
 
     if not args.no_pretrain:
@@ -288,10 +296,15 @@ def main():
     except Exception as exc:
         print(f"[warn] gif export failed: {exc}", flush=True)
 
-    final_chi2 = {k: v[-1] for k, v in hist["chi2"].items()}
+    # report the chi2 of the epoch whose model was checkpointed and evaluated
+    # (training restores the best model by worst-product chi2, not the last)
+    per_epoch_max = np.max(np.stack([np.asarray(v) for v in hist["chi2"].values()]), axis=0)
+    best_ep = int(np.argmin(per_epoch_max))
+    final_chi2 = {k: float(v[best_ep]) for k, v in hist["chi2"].items()}
     metrics = {
         "basis": args.basis,
         "epochs_run": total_epochs,
+        "best_epoch": best_ep + 1,
         "final_chi2": final_chi2,
         "nrmse": nrmse,
         "evpa_error_deg": evpa_err,
