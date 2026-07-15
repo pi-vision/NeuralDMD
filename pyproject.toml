@@ -41,6 +41,9 @@ include = ["neuraldmd*"]
 [tool.setuptools.dynamic]
 version = { attr = "neuraldmd.__version__" }
 
+[tool.setuptools.package-data]
+"neuraldmd.data" = ["arrays/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
