@@ -27,77 +27,10 @@ import optax
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-
-# -------------------------
-# Building blocks
-# -------------------------
-class SinusoidalEncoding(eqx.Module):
-    """Fixed positional encoding: (x, sin/cos(2^k x), y, sin/cos(2^k y))."""
-
-    frequencies: tuple = eqx.field(static=True)
-
-    def __init__(self, num_frequencies=10):
-        self.frequencies = tuple(float(2**k) for k in range(num_frequencies))
-
-    def __call__(self, xy):
-        x, y = xy[0], xy[1]
-        encoding_x = [x]
-        encoding_y = [y]
-        for freq in self.frequencies:
-            encoding_x.append(jnp.sin(freq * x))
-            encoding_x.append(jnp.cos(freq * x))
-            encoding_y.append(jnp.sin(freq * y))
-            encoding_y.append(jnp.cos(freq * y))
-        return jnp.array(encoding_x + encoding_y)
-
-
-class ResBlock(eqx.Module):
-    ln: eqx.nn.LayerNorm
-    lin1: eqx.nn.Linear
-    lin2: eqx.nn.Linear
-    scale: float = eqx.field(static=True)
-
-    def __init__(self, width, scale=0.1, key=None):
-        k1, k2 = jax.random.split(key, 2)
-        self.ln = eqx.nn.LayerNorm(width)
-        self.lin1 = eqx.nn.Linear(width, width, key=k1)
-        self.lin2 = eqx.nn.Linear(width, width, key=k2)
-        self.scale = scale
-
-    def __call__(self, x):
-        h = self.ln(x)
-        h = jax.nn.silu(self.lin1(h))
-        h = self.lin2(h)
-        return x + self.scale * h
-
-
-class ResidualMLP(eqx.Module):
-    in_proj: eqx.nn.Linear
-    blocks: tuple
-    out_head: eqx.nn.Linear
-
-    def __init__(self, in_dim, width, depth, out_dim, scale=0.1, key=None):
-        k_in, k_out, *ks = jax.random.split(key, depth + 2)
-        self.in_proj = eqx.nn.Linear(in_dim, width, key=k_in)
-        self.blocks = tuple(
-            ResBlock(width, scale=scale, key=ks[i]) for i in range(depth)
-        )
-        self.out_head = eqx.nn.Linear(width, out_dim, key=k_out)
-
-    def __call__(self, x):
-        h = self.in_proj(x)
-        for block in self.blocks:
-            h = block(h)
-        return self.out_head(h)
-
-
-def zero_init_linear(in_dim, out_dim, key):
-    lin = eqx.nn.Linear(in_dim, out_dim, key=key)
-    return eqx.tree_at(
-        lambda l: (l.weight, l.bias),
-        lin,
-        (jnp.zeros_like(lin.weight), jnp.zeros_like(lin.bias)),
-    )
+# Building blocks now live in the package (Phase-2 refactor); re-exported here
+# so `from neural_dmd import ...` keeps working during the transition.
+from neuraldmd.encoding import SinusoidalEncoding
+from neuraldmd.networks import ResBlock, ResidualMLP, zero_init_linear
 
 
 # -------------------------
