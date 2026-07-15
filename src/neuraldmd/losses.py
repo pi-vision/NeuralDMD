@@ -97,3 +97,121 @@ def loss_fn(
         + b_sparse_weight * sparsity_loss(b0, b)
     )
     return total, (reconstruction_loss, chi2_vis, chi2_amp, chi2_cp)
+
+
+def _physical_intensities(model, xy, time_indices, frame_max, frame_min):
+    """Reconstruct one scalar model's physical-unit intensities and mode arrays.
+
+    Mirrors the inline reconstruction in :func:`loss_fn` exactly (so the
+    Stokes-I path is bit-identical).
+
+    Parameters
+    ----------
+    model : NeuralDMD
+        A single scalar model.
+    xy : jax.Array
+        ``(P, 2)`` pixel coordinates.
+    time_indices : jax.Array
+        ``(T,)`` normalized times of the frame batch.
+    frame_max, frame_min : float
+        Output scaling ``intensities * (frame_max - frame_min) + frame_min``.
+
+    Returns
+    -------
+    intensities : jax.Array
+        ``(P, T)`` physical-unit intensities.
+    modes : tuple
+        ``(W0, W, b0, b)`` for the sparsity penalties.
+    """
+    W0, W, Omega, b0, b = model(xy)
+    lambda_exp = jnp.exp(Omega[:, None] * time_indices[None, :] * model.t_scale)
+    i_stat = W0[:, 0:1] * b0[0]
+    i_dyn = 2 * jnp.real(jnp.einsum("pr,rt,r->pt", W, lambda_exp, b))
+    intensities = (i_stat + i_dyn) * (frame_max - frame_min) + frame_min
+    return intensities, (W0, W, b0, b)
+
+
+def polarized_loss_fn(
+    model,
+    xy,
+    vis_target: dict,
+    vis_sigma: dict,
+    vis_mask: dict,
+    A_batch,
+    time_indices,
+    frame_max: dict,
+    frame_min: dict,
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
+    p_le_i_weight: float = 0.0,
+):
+    """Per-Stokes visibility chi-squared for a :class:`PolarizedNeuralDMD`.
+
+    The gradient-driving loss is the sum of per-Stokes reduced chi-squared (equal
+    weights, each divided by ``2 * sum(mask)`` as in :func:`loss_fn`), plus a
+    negativity penalty applied to **Stokes I only** (Q, U, V are signed), per-net
+    sparsity, and an optional soft ``P <= I`` penalty (default off). Closure/amp
+    diagnostics live in :func:`loss_fn` / evaluation and are not recomputed here.
+
+    With ``model.stokes == ("I",)`` and matching weights/scaling this returns
+    exactly the :func:`loss_fn` total (parity gate in ``tests/test_polarized_loss.py``).
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        The polarized container.
+    xy : jax.Array
+        ``(P, 2)`` pixel coordinates.
+    vis_target, vis_sigma, vis_mask : dict of str -> jax.Array
+        Per-Stokes visibility targets, 1-sigma errors, and 0/1 masks, each ``(T, V)``.
+    A_batch : jax.Array
+        ``(T, V, P)`` image->visibility operator (shared across Stokes).
+    time_indices : jax.Array
+        ``(T,)`` normalized frame times.
+    frame_max, frame_min : dict of str -> float
+        Per-Stokes output scaling (Stokes I uses the physical intensity range;
+        signed Stokes typically use ``frame_min = 0`` with a symmetric ``frame_max``).
+    neg_weight, w_sparse_weight, b_sparse_weight : float
+        Weights for the I-negativity and per-net sparsity penalties.
+    p_le_i_weight : float
+        Weight for the optional ``sum(relu(sqrt(Q^2+U^2+V^2) - I)^2)`` penalty
+        (default 0.0 -> disabled; no effect on Stokes-I-only parity).
+
+    Returns
+    -------
+    total : jax.Array
+        Scalar loss.
+    aux : dict
+        ``{"chi2_vis": {stokes: value}, "neg_I": value, "p_penalty": value}``.
+    """
+    chi2: dict[str, jax.Array] = {}
+    phys: dict[str, jax.Array] = {}
+    sparse_total = 0.0
+    for s in model.stokes:
+        intensities, (W0, W, b0, b) = _physical_intensities(
+            model.models[s], xy, time_indices, frame_max[s], frame_min[s]
+        )
+        phys[s] = intensities
+        vis_pred = jnp.einsum("tvp,pt->tv", A_batch, intensities.astype(jnp.complex64))
+        vis_diff = jnp.abs(vis_pred - vis_target[s])
+        chi2[s] = jnp.sum(vis_diff**2 * vis_mask[s] / vis_sigma[s] ** 2) / (
+            2.0 * jnp.sum(vis_mask[s])
+        )
+        sparse_total = (
+            sparse_total
+            + w_sparse_weight * sparsity_loss(W0, W)
+            + b_sparse_weight * sparsity_loss(b0, b)
+        )
+
+    neg_i = jnp.sum(jax.nn.relu(-phys["I"]) ** 2)  # negativity: Stokes I only
+
+    pol = [s for s in model.stokes if s in ("Q", "U", "V")]
+    if p_le_i_weight and pol:
+        p_sq = sum(phys[s] ** 2 for s in pol)
+        p_penalty = jnp.sum(jax.nn.relu(jnp.sqrt(p_sq) - phys["I"]) ** 2)
+    else:
+        p_penalty = jnp.asarray(0.0)
+
+    total = sum(chi2.values()) + neg_weight * neg_i + p_le_i_weight * p_penalty + sparse_total
+    return total, {"chi2_vis": chi2, "neg_I": neg_i, "p_penalty": p_penalty}
