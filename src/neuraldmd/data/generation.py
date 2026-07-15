@@ -620,6 +620,108 @@ def generate(cfg: Config):
     return cfg.outdir
 
 
+def generate_polarized_dataset(
+    out_dir,
+    *,
+    npix: int = 32,
+    fov_uas: float = 200.0,
+    num_frames: int = 64,
+    tstart_hr: float = 9.0,
+    tstop_hr: float = 15.0,
+    tint: float = 30.0,
+    bw: float = 2.0e9,
+    frac_pol: float = 0.3,
+    evpa_winding: int = 1,
+    evpa_offset_deg: float = 0.0,
+    fractional_noise: float = 0.04,
+    ampcal: bool = True,
+    phasecal: bool = True,
+    array_name: str = "EHT2017",
+    array_dir=None,
+    stokes: tuple[str, ...] = ("I", "Q", "U"),
+    basis: str = "stokes",
+    ttype: str = "direct",
+    seed: int = 42,
+    spot_kwargs: dict | None = None,
+):
+    """Generate a polarized synthetic dataset end-to-end and write a v2 obs_dir.
+
+    Pipeline: synthesize a polarized m-ring + hot-spot movie
+    (:func:`neuraldmd.data.movies.make_polarized_frames`) at the model grid,
+    observe it with the EHT array (``Movie.observe``, Stokes polrep, thermal +
+    optional fractional noise), save ``obs.uvfits``, then ingest via
+    :func:`load_uvfits_to_products` in the requested ``basis`` and write the
+    obs_dir (shared A + per-key products). Requires ehtim.
+
+    Parameters
+    ----------
+    out_dir : str or pathlib.Path
+        Output directory (obs_dir + ``obs.uvfits``).
+    npix, fov_uas, num_frames, tstart_hr, tstop_hr : see the movie synthesizer.
+    tint, bw : float
+        Integration time [s] and bandwidth [Hz] for the observation.
+    frac_pol, evpa_winding, evpa_offset_deg : polarization-field parameters.
+    fractional_noise : float
+        Fractional systematic noise added in quadrature (0 disables).
+    ampcal, phasecal : bool
+        If False, ehtim injects amplitude/phase gain errors (for later cal work).
+    array_name, array_dir : str, path
+        Telescope array (``<array_dir>/<array_name>.txt``; defaults to the packaged EHT2017).
+    stokes, basis, products : passed to :func:`load_uvfits_to_products`.
+    ttype : str
+        ehtim Fourier type; ``"direct"`` gives the dense operator the loader needs.
+    seed : int
+        Observation noise seed (reproducible dataset).
+    spot_kwargs : dict or None
+        Extra m-ring / hot-spot geometry overrides.
+
+    Returns
+    -------
+    ObsProducts
+        The ingested dataset (also written to ``out_dir``).
+    """
+    import ehtim as eh
+
+    from .movies import make_polarized_frames, to_ehtim_movie
+    from .observations import load_uvfits_to_products
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    array_dir = Path(array_dir) if array_dir is not None else Path(__file__).parent / "arrays"
+    array = eh.array.load_txt(str(array_dir / f"{array_name}.txt"))
+
+    intensity, q, u, times = make_polarized_frames(
+        num_frames=num_frames,
+        tstart_hr=tstart_hr,
+        tstop_hr=tstop_hr,
+        npix=npix,
+        fov_uas=fov_uas,
+        frac_pol=frac_pol,
+        evpa_winding=evpa_winding,
+        evpa_offset_deg=evpa_offset_deg,
+        **(spot_kwargs or {}),
+    )
+    movie = to_ehtim_movie(intensity, times, fov_uas=fov_uas, qframes=q, uframes=u)
+
+    tadv = float((tstop_hr - tstart_hr) * 3600.0 / max(num_frames - 1, 1))
+    obs = movie.observe(
+        array, tint, tadv, tstart_hr, tstop_hr, bw,
+        polrep_obs="stokes", ttype=ttype, add_th_noise=True,
+        ampcal=ampcal, phasecal=phasecal, seed=seed, verbose=False,
+    )
+    if fractional_noise:
+        obs = obs.add_fractional_noise(fractional_noise)
+
+    uvfits_path = out_dir / "obs.uvfits"
+    obs.save_uvfits(str(uvfits_path))
+
+    op = load_uvfits_to_products(
+        uvfits_path, npix=npix, fov_uas=fov_uas, stokes=tuple(stokes), basis=basis
+    )
+    op.to_obs_dir(out_dir)
+    return op
+
+
 if __name__ == "__main__":
     import argparse
 
