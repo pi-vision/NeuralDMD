@@ -118,32 +118,50 @@ def make_polarized_optimizer(
     model,
     initial_lr: float = 3e-4,
     weight_decay: float = 1e-4,
+    *,
+    optimizer: str = "adamw",
+    lr_decay_rate: float = 1.0,
+    lr_decay_steps: int = 1000,
 ):
-    """Build the AdamW optimizer for a :class:`PolarizedNeuralDMD`.
+    """Build the optimizer for a :class:`PolarizedNeuralDMD` (single transform).
 
-    A single transform over the whole parameter tree (LR wrapped in
-    ``optax.inject_hyperparams`` so it can be annealed at runtime, as in
-    :func:`train_model`). Per-Stokes freezing (the hierarchical study mode) is
-    applied in :func:`polarized_train_step` via ``frozen_stokes`` -- the frozen
-    sub-models' updates are zeroed there, an exact freeze including weight decay.
+    Per-Stokes freezing (the hierarchical study mode) is applied in
+    :func:`polarized_train_step` via ``frozen_stokes`` -- the frozen sub-models'
+    updates are zeroed there, an exact freeze including weight decay.
 
     Parameters
     ----------
     model : PolarizedNeuralDMD
         Model whose parameter tree the optimizer state is shaped to.
     initial_lr : float
-        AdamW learning rate.
+        Initial learning rate.
     weight_decay : float
-        AdamW decoupled weight decay.
+        Decoupled weight decay (``adamw`` only).
+    optimizer : {"adamw", "adam", "adamax"}
+        Update rule; ``"adamax"`` matches the KINE imaging setup.
+    lr_decay_rate : float
+        If < 1.0, use ``optax.exponential_decay(initial_lr, lr_decay_steps,
+        lr_decay_rate)`` (per-step annealing); 1.0 keeps the LR constant.
+    lr_decay_steps : int
+        Transition steps for the exponential decay.
 
     Returns
     -------
     optax.GradientTransformation
         Initialize with ``opt.init(eqx.filter(model, eqx.is_array))``.
     """
-    return optax.inject_hyperparams(optax.adamw)(
-        learning_rate=initial_lr, weight_decay=weight_decay
+    lr = (
+        optax.exponential_decay(initial_lr, lr_decay_steps, lr_decay_rate)
+        if lr_decay_rate < 1.0
+        else initial_lr
     )
+    if optimizer == "adamax":
+        return optax.adamax(learning_rate=lr)
+    if optimizer == "adam":
+        return optax.adam(learning_rate=lr)
+    if optimizer == "adamw":
+        return optax.adamw(learning_rate=lr, weight_decay=weight_decay)
+    raise ValueError(f"unknown optimizer {optimizer!r}")
 
 
 def _zero_frozen_updates(updates, frozen_stokes: tuple[str, ...]):
@@ -286,6 +304,9 @@ def train_polarized_model(
     frozen_stokes: tuple[str, ...] = (),
     initial_lr: float = 3e-4,
     weight_decay: float = 1e-4,
+    optimizer_name: str = "adamw",
+    lr_decay_rate: float = 1.0,
+    lr_decay_steps: int = 1000,
     neg_weight: float = 1.0,
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
@@ -309,7 +330,10 @@ def train_polarized_model(
         ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists).
     """
     os.makedirs(models_dir, exist_ok=True)
-    optimizer = make_polarized_optimizer(model, initial_lr=initial_lr, weight_decay=weight_decay)
+    optimizer = make_polarized_optimizer(
+        model, initial_lr=initial_lr, weight_decay=weight_decay,
+        optimizer=optimizer_name, lr_decay_rate=lr_decay_rate, lr_decay_steps=lr_decay_steps,
+    )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
 

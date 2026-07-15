@@ -34,6 +34,14 @@ def parse_args():
     ap.add_argument("--num-layers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reuse-data", action="store_true", help="Reuse an existing data/ obs_dir")
+    # Stokes-I disk-template pretraining (image prior)
+    ap.add_argument("--no-pretrain", action="store_true", help="Skip the Stokes-I pretrain")
+    ap.add_argument("--pretrain-steps", type=int, default=2000)
+    ap.add_argument("--pretrain-lr", type=float, default=1e-4)
+    # optimizer / LR schedule (KINE-style annealing when decay-rate < 1)
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam", "adamax"])
+    ap.add_argument("--lr-decay-rate", type=float, default=1.0, help="<1 enables exp decay")
+    ap.add_argument("--lr-decay-steps", type=int, default=2000)
     return ap.parse_args()
 
 
@@ -42,8 +50,10 @@ def main():
     from neuraldmd import evaluation as ev
     from neuraldmd.data.generation import generate_polarized_dataset
     from neuraldmd.data.loader import PolarizedDMDDataLoader
+    from neuraldmd.data.movies import save_movie_hdf5, to_ehtim_movie
     from neuraldmd.data.observations import ObsProducts
     from neuraldmd.polarized import PolarizedNeuralDMD
+    from neuraldmd.pretraining import pretrain_stokes_i
     from neuraldmd.training import train_polarized_model
 
     print("jax devices:", jax.devices(), flush=True)
@@ -80,18 +90,37 @@ def main():
         hidden_size=args.hidden_size, num_layers=args.num_layers,
     )
 
+    if not args.no_pretrain:
+        print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
+        model, _ = pretrain_stokes_i(
+            model, truth_cubes["I"], num_steps=args.pretrain_steps,
+            lr=args.pretrain_lr, key=jax.random.PRNGKey(args.seed + 2),
+        )
+
     extra = {"products": op.stokes} if args.basis == "circular" else {}
-    print(f"Training ({args.basis} basis, {args.epochs} epochs) ...", flush=True)
+    print(f"Training ({args.basis} basis, {args.optimizer}, {args.epochs} epochs) ...", flush=True)
     model, hist = train_polarized_model(
         model, loader, num_epochs=args.epochs, key=jax.random.PRNGKey(args.seed + 1),
         models_dir=str(out / "models"), frame_max=frame_max, frame_min=frame_min,
-        basis=args.basis, initial_lr=args.lr, early_stop_chi2=1.0, print_every=200, **extra,
+        basis=args.basis, initial_lr=args.lr, optimizer_name=args.optimizer,
+        lr_decay_rate=args.lr_decay_rate, lr_decay_steps=args.lr_decay_steps,
+        early_stop_chi2=1.0, print_every=200, **extra,
     )
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
     ev.plot_polarized_summary(recon, truth_cubes, str(out / "pol_summary.png"))
+
+    # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
+    try:
+        recon_movie = to_ehtim_movie(
+            recon["I"].astype(np.float64), truth["times"], fov_uas=args.fov_uas,
+            qframes=recon["Q"].astype(np.float64), uframes=recon["U"].astype(np.float64),
+        )
+        save_movie_hdf5(recon_movie, str(out / "recon_pol.hdf5"))
+    except Exception as exc:
+        print(f"[warn] reconstruction hdf5 export failed: {exc}", flush=True)
 
     final_chi2 = {k: hist["chi2"][k][-1] for k in loader.keys}
     metrics = {

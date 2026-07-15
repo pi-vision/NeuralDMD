@@ -94,6 +94,45 @@ def test_hierarchical_freezes_I_but_trains_others():
     assert q_changed, "trainable Stokes Q did not change"
 
 
+def test_pretrain_stokes_i_touches_only_i():
+    """pretrain_stokes_i aligns the I sub-model (loss decreases) and leaves Q/U
+    parameters bit-identical."""
+    from neuraldmd.pretraining import pretrain_stokes_i
+
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(0), **MODEL_KW)
+    truth_i = np.abs(np.random.default_rng(0).normal(size=(4, 16, 16)))
+
+    def leaves(m, s):
+        return jax.tree_util.tree_leaves(m.models[s])
+
+    pre, losses = pretrain_stokes_i(model, truth_i, num_steps=25, lr=1e-3)
+    assert losses[-1] < losses[0]
+    for s in ("Q", "U"):
+        assert all(
+            np.allclose(np.asarray(a), np.asarray(b))
+            for a, b in zip(leaves(model, s), leaves(pre, s), strict=True)
+        )
+    assert any(
+        not np.allclose(np.asarray(a), np.asarray(b))
+        for a, b in zip(leaves(model, "I"), leaves(pre, "I"), strict=True)
+    )
+
+
+def test_optimizer_variants_build_and_step():
+    """adam/adamax and an exponential-decay schedule all build and take a step."""
+    from neuraldmd.training import make_polarized_optimizer
+
+    model = PolarizedNeuralDMD(("I", "Q"), r=2, key=jax.random.PRNGKey(5), **MODEL_KW)
+    xy, a, ti, targets, sig, msk, fmax, fmin = _fittable_batch(stokes=("I", "Q"), seed=5)
+    for name in ("adam", "adamax"):
+        opt = make_polarized_optimizer(model, optimizer=name, lr_decay_rate=0.5, lr_decay_steps=10)
+        st = opt.init(eqx.filter(model, eqx.is_inexact_array))
+        _, _, loss, _ = polarized_train_step(
+            model, st, xy, targets, sig, msk, a, ti, opt, fmax, fmin, **_NOPEN
+        )
+        assert np.isfinite(float(loss))
+
+
 def test_circular_basis_training_reduces_loss():
     """A few steps in the circular (per-product) basis reduce the total loss."""
     model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(2), **MODEL_KW)
