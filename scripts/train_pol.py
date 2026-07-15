@@ -59,6 +59,24 @@ def parse_args():
         help="DMD modes for the pol fields (default = --r; use < r to starve capacity)",
     )
     ap.add_argument(
+        "--pol-frequencies",
+        type=int,
+        default=None,
+        help="positional-encoding frequencies for the pol fields (spatial band-limit)",
+    )
+    ap.add_argument(
+        "--pol-hidden",
+        type=int,
+        default=None,
+        help="hidden width of the pol spatial MLPs (default = --hidden-size)",
+    )
+    ap.add_argument(
+        "--pol-layers",
+        type=int,
+        default=None,
+        help="depth of the pol spatial MLPs (default = --num-layers)",
+    )
+    ap.add_argument(
         "--pol-warmup-epochs",
         type=int,
         default=0,
@@ -70,6 +88,26 @@ def parse_args():
         default=None,
         help="hard-freeze Stokes I from this epoch on (fit pol on a fixed I)",
     )
+    # two-stage curriculum: RR/LL-only I fit (pol frozen), then pol on frozen I
+    ap.add_argument(
+        "--i-only-epochs",
+        type=int,
+        default=0,
+        help="stage-A epochs fitting only RR,LL with pol frozen (0 = single joint stage)",
+    )
+    ap.add_argument(
+        "--pol-lr",
+        type=float,
+        default=None,
+        help="stage-B (pol) initial learning rate (default = --lr)",
+    )
+    # total-flux (lightcurve) anchor: no zero-spacing baseline measures this
+    ap.add_argument(
+        "--flux", type=float, default=None, help="known total flux [Jy] (anchor off=None)"
+    )
+    ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
+    # evaluation: also report metrics after restoring both cubes to this beam
+    ap.add_argument("--blur-uas", type=float, default=15.0, help="metric beam FWHM [uas]")
     # per-product early stop: stop once ALL products <= this; <1 so images sharpen
     ap.add_argument("--early-stop-chi2", type=float, default=0.8)
     return ap.parse_args()
@@ -121,6 +159,16 @@ def main():
     loader = PolarizedDMDDataLoader(
         op, npix=args.npix, batch_size=args.batch_size, epochs=args.epochs, fov_x=np.pi, fov_y=np.pi
     )
+    # spatial band-limit for the pol fields: smaller/lower-frequency nets than I
+    pol_kwargs = {
+        k: v
+        for k, v in {
+            "num_frequencies": args.pol_frequencies,
+            "hidden_size": args.pol_hidden,
+            "num_layers": args.pol_layers,
+        }.items()
+        if v is not None
+    }
     model = PolarizedNeuralDMD(
         stokes,
         r=args.r,
@@ -128,6 +176,7 @@ def main():
         outshift=args.outshift,
         scaling_ml=args.scaling_ml,
         r_pol=args.r_pol,
+        pol_model_kwargs=pol_kwargs or None,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
     )
@@ -143,31 +192,75 @@ def main():
             key=jax.random.PRNGKey(args.seed + 2),
         )
 
-    extra = {"products": op.stokes} if args.basis == "circular" else {}
-    print(f"Training ({args.basis} basis, {args.optimizer}, {args.epochs} epochs) ...", flush=True)
-    model, hist = train_polarized_model(
-        model,
-        loader,
-        num_epochs=args.epochs,
-        key=jax.random.PRNGKey(args.seed + 1),
+    common = dict(
         models_dir=str(out / "models"),
         frame_max=frame_max,
         frame_min=frame_min,
         basis=args.basis,
-        initial_lr=args.lr,
         optimizer_name=args.optimizer,
         lr_decay_rate=args.lr_decay_rate,
         lr_decay_steps=args.lr_decay_steps,
-        pol_warmup_epochs=args.pol_warmup_epochs,
-        freeze_i_after=args.freeze_i_after,
+        flux_target=args.flux,
+        flux_weight=args.flux_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,
-        **extra,
     )
+    total_epochs = 0
+    if args.i_only_epochs > 0:
+        # stage A: fit Stokes I alone on the parallel hands; pol frozen at its
+        # near-unpolarized init (no pol residual can corrupt I, and vice versa)
+        if args.basis != "circular":
+            raise SystemExit("--i-only-epochs requires --basis circular")
+        print(f"Stage A: I-only (RR,LL), pol frozen, {args.i_only_epochs} epochs ...", flush=True)
+        model, hist_a = train_polarized_model(
+            model,
+            loader,
+            num_epochs=args.i_only_epochs,
+            key=jax.random.PRNGKey(args.seed + 1),
+            initial_lr=args.lr,
+            products=("RR", "LL"),
+            freeze_pol=True,
+            **common,
+        )
+        total_epochs += len(hist_a["total"])
+        print(f"Stage B: pol on frozen I (all products), {args.epochs} epochs ...", flush=True)
+        model, hist = train_polarized_model(
+            model,
+            loader,
+            num_epochs=args.epochs,
+            key=jax.random.PRNGKey(args.seed + 3),
+            initial_lr=args.pol_lr if args.pol_lr is not None else args.lr,
+            products=op.stokes,
+            freeze_intensity=True,
+            **common,
+        )
+    else:
+        extra = {"products": op.stokes} if args.basis == "circular" else {}
+        print(
+            f"Training ({args.basis} basis, {args.optimizer}, {args.epochs} epochs) ...", flush=True
+        )
+        model, hist = train_polarized_model(
+            model,
+            loader,
+            num_epochs=args.epochs,
+            key=jax.random.PRNGKey(args.seed + 1),
+            initial_lr=args.lr,
+            pol_warmup_epochs=args.pol_warmup_epochs,
+            freeze_i_after=args.freeze_i_after,
+            **common,
+            **extra,
+        )
+    total_epochs += len(hist["total"])
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
+    # beam-restored metrics: the data only constrain structure to ~the array
+    # resolution, so also compare after blurring both cubes to a common beam
+    recon_b = ev.blur_polarized_cubes(recon, args.blur_uas, args.fov_uas)
+    truth_b = ev.blur_polarized_cubes(truth_cubes, args.blur_uas, args.fov_uas)
+    nrmse_b = ev.polarized_nrmse(recon_b, truth_b)
+    evpa_err_b = ev.evpa_error_deg(recon_b, truth_b)
     ev.plot_polarized_summary(
         recon, truth_cubes, str(out / "pol_summary.png"), fov_uas=args.fov_uas
     )
@@ -192,17 +285,22 @@ def main():
     except Exception as exc:
         print(f"[warn] gif export failed: {exc}", flush=True)
 
-    final_chi2 = {k: hist["chi2"][k][-1] for k in loader.keys}
+    final_chi2 = {k: v[-1] for k, v in hist["chi2"].items()}
     metrics = {
         "basis": args.basis,
-        "epochs_run": len(hist["total"]),
+        "epochs_run": total_epochs,
         "final_chi2": final_chi2,
         "nrmse": nrmse,
         "evpa_error_deg": evpa_err,
+        "blur_uas": args.blur_uas,
+        "nrmse_blurred": nrmse_b,
+        "evpa_error_deg_blurred": evpa_err_b,
         "gate": {
             "chi2_in_0.8_1.2": all(0.8 <= v <= 1.2 for v in final_chi2.values()),
             "nrmse_QU_le_0.15": (nrmse["Q"] <= 0.15 and nrmse["U"] <= 0.15),
             "evpa_le_10deg": bool(evpa_err <= 10.0),
+            "nrmse_QU_blurred_le_0.15": (nrmse_b["Q"] <= 0.15 and nrmse_b["U"] <= 0.15),
+            "evpa_blurred_le_10deg": bool(evpa_err_b <= 10.0),
         },
     }
     (out / "m2_metrics.json").write_text(json.dumps(metrics, indent=2))

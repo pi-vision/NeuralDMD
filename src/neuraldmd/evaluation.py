@@ -285,6 +285,40 @@ def polarized_nrmse(recon, truth):
     return out
 
 
+def blur_polarized_cubes(cubes, fwhm_uas, fov_uas):
+    """Convolve every Stokes cube with a circular Gaussian beam.
+
+    Interferometric images are only constrained up to the array resolution, so
+    image-fidelity metrics are conventionally also quoted after restoring both
+    reconstruction and truth to a common beam.
+
+    Parameters
+    ----------
+    cubes : dict of str -> numpy.ndarray
+        ``{stokes: (T, H, W)}`` image cubes.
+    fwhm_uas : float
+        Beam FWHM [micro-arcsec]; ``<= 0`` returns the input unchanged.
+    fov_uas : float
+        Field of view [micro-arcsec] of the image grid.
+
+    Returns
+    -------
+    dict of str -> numpy.ndarray
+        Blurred cubes with the same shapes and keys.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    if fwhm_uas <= 0:
+        return cubes
+    out = {}
+    for s, cube in cubes.items():
+        cube = np.asarray(cube)
+        npix = cube.shape[-1]
+        sigma_pix = (fwhm_uas / (fov_uas / npix)) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        out[s] = gaussian_filter(cube, sigma=(0.0, sigma_pix, sigma_pix))
+    return out
+
+
 def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     """Median EVPA error [degrees] where the truth polarized intensity is bright.
 

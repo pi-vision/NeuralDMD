@@ -223,6 +223,8 @@ def polarized_train_step(
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
@@ -258,6 +260,8 @@ def polarized_train_step(
             w_sparse_weight=w_sparse_weight,
             b_sparse_weight=b_sparse_weight,
             p_le_i_weight=p_le_i_weight,
+            flux_target=flux_target,
+            flux_weight=flux_weight,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
@@ -287,6 +291,8 @@ def polarized_train_epoch(
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
 ):
     """Scan :func:`polarized_train_step` over one epoch's batches.
 
@@ -328,6 +334,8 @@ def polarized_train_epoch(
             w_sparse_weight=w_sparse_weight,
             b_sparse_weight=b_sparse_weight,
             p_le_i_weight=p_le_i_weight,
+            flux_target=flux_target,
+            flux_weight=flux_weight,
         )
         return (model, opt_state, key), (loss, aux["chi2_vis"])
 
@@ -351,6 +359,7 @@ def train_polarized_model(
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     freeze_intensity: bool = False,
+    freeze_pol: bool = False,
     pol_warmup_epochs: int = 0,
     freeze_i_after: int | None = None,
     initial_lr: float = 3e-4,
@@ -362,6 +371,8 @@ def train_polarized_model(
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
     print_every: int = 50,
     early_stop_chi2: float | None = None,
     early_stop_epochs: int = 3,
@@ -377,15 +388,23 @@ def train_polarized_model(
     at chi^2 < 1, so stopping at 1 leaves the images under-sharpened. The best
     (lowest worst-product chi^2) model is checkpointed and returned.
 
-    ``pol_warmup_epochs`` linearly ramps the polarization learning rate from 0 to
-    full over the first epochs so Stokes I converges before polarization is fit;
-    ``freeze_i_after`` additionally hard-freezes Stokes I from that epoch onward
-    (fit polarization on a fixed I, as in a staged reconstruction).
+    In the circular basis, ``products`` may be a subset (e.g. ``("RR", "LL")``
+    fits only the parallel hands = Stokes I when V is absent); the chi-squared
+    history, early stopping, and checkpoint metric then cover just those
+    products. ``freeze_pol`` zeroes every polarization-field update (an exact
+    freeze, including weight decay) -- with it, an RR/LL-only stage trains I
+    alone while the polarization fields stay at their near-unpolarized
+    initialization. ``pol_warmup_epochs`` instead ramps the polarization
+    learning rate linearly from 0 to full; ``freeze_i_after`` hard-freezes
+    Stokes I from that epoch onward (fit polarization on a fixed I, as in a
+    staged reconstruction).
 
     Returns
     -------
     model, history
-        ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists).
+        ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists,
+        keyed by ``products`` in the circular basis and by the loader keys
+        otherwise).
     """
     os.makedirs(models_dir, exist_ok=True)
     optimizer = make_polarized_optimizer(
@@ -399,7 +418,10 @@ def train_polarized_model(
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
 
-    history = {"total": [], "chi2": {k: [] for k in loader.keys}}
+    # the loss only produces chi2 for the fitted keys (a product subset in the
+    # circular basis), so history/early-stop/checkpointing are keyed off those
+    hist_keys = tuple(products) if basis == "circular" else tuple(loader.keys)
+    history = {"total": [], "chi2": {k: [] for k in hist_keys}}
     best_metric = float("inf")
     at_noise = 0
 
@@ -409,10 +431,9 @@ def train_polarized_model(
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
             # pol-LR curriculum: ramp polarization updates 0 -> 1 over the warmup
             # so Stokes I converges first, then fit polarization at full rate
-            pol_scale = jnp.asarray(
-                min(1.0, (epoch + 1) / pol_warmup_epochs) if pol_warmup_epochs > 0 else 1.0,
-                dtype=jnp.float32,
-            )
+            # (freeze_pol pins them at 0 for the whole call: an I-only stage)
+            ramp = min(1.0, (epoch + 1) / pol_warmup_epochs) if pol_warmup_epochs > 0 else 1.0
+            pol_scale = jnp.asarray(0.0 if freeze_pol else ramp, dtype=jnp.float32)
             # optional hard freeze of the (by now converged) I during the pol tail
             freeze_i = freeze_intensity or (freeze_i_after is not None and epoch >= freeze_i_after)
             model, opt_state, loss, chi2 = polarized_train_epoch(
@@ -431,9 +452,11 @@ def train_polarized_model(
                 w_sparse_weight=w_sparse_weight,
                 b_sparse_weight=b_sparse_weight,
                 p_le_i_weight=p_le_i_weight,
+                flux_target=flux_target,
+                flux_weight=flux_weight,
             )
             history["total"].append(float(loss))
-            for k in loader.keys:
+            for k in hist_keys:
                 history["chi2"][k].append(float(chi2[k]))
             mean_chi2 = float(sum(chi2.values()) / len(chi2))
             max_chi2 = float(max(chi2.values()))
@@ -441,7 +464,7 @@ def train_polarized_model(
             pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{mean_chi2:.3f}")
             pbar.update(1)
             if (epoch + 1) % print_every == 0:
-                per_key = "  ".join(f"chi2_{k}={float(chi2[k]):.3f}" for k in loader.keys)
+                per_key = "  ".join(f"chi2_{k}={float(chi2[k]):.3f}" for k in hist_keys)
                 print(
                     f"Epoch {epoch + 1}/{num_epochs}  loss={float(loss):.5f}  {per_key}",
                     flush=True,

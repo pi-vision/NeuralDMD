@@ -329,3 +329,28 @@ def test_invalid_basis_raises():
             fmin,
             basis="linear",
         )
+
+
+def test_flux_anchor_matches_hand_computed_value():
+    """The total-flux anchor adds exactly
+    ``flux_weight * mean_t(((sum_p I - F) / F)^2)`` on top of the base loss."""
+    b = _batch(seed=7)
+    stokes = ("I", "Q", "U")
+    model = PolarizedNeuralDMD(stokes, r=2, key=jax.random.PRNGKey(3), **MODEL_KW)
+    tgt = {s: b["vt"] for s in stokes}
+    sig = {s: b["vs"] for s in stokes}
+    msk = {s: b["vm"] for s in stokes}
+    fmax = {s: 1.0 for s in stokes}
+    fmin = {s: 0.0 for s in stokes}
+    args = (model, b["xy"], tgt, sig, msk, b["A"], b["ti"], fmax, fmin)
+
+    base, aux0 = polarized_loss_fn(*args)
+    assert float(aux0["flux_penalty"]) == 0.0
+
+    flux, w = 2.7, 3.0
+    total, aux = polarized_loss_fn(*args, flux_target=flux, flux_weight=w)
+    images, _ = model.stokes_fields(b["xy"], b["ti"], fmax, fmin)
+    tot_t = np.asarray(images["I"]).sum(axis=0)
+    expected = float(np.mean(((tot_t - flux) / flux) ** 2))
+    np.testing.assert_allclose(float(aux["flux_penalty"]), expected, rtol=1e-6)
+    np.testing.assert_allclose(float(total), float(base) + w * expected, rtol=1e-6)

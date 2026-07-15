@@ -124,14 +124,17 @@ def polarized_loss_fn(
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
     The gradient-driving term is a sum of reduced chi-squared, each divided by
     ``2 * sum(mask)`` as in :func:`loss_fn`, plus a negativity penalty on **Stokes
-    I only** (Q, U, V are signed), per-net sparsity, and an optional soft
-    ``P <= I`` penalty (default off). These image-domain penalties do not depend
-    on the fidelity basis.
+    I only** (Q, U, V are signed), per-net sparsity, an optional soft ``P <= I``
+    penalty (default off), and an optional total-flux (lightcurve) anchor
+    (default off). These image-domain penalties do not depend on the fidelity
+    basis.
 
     Two fidelity bases:
 
@@ -172,6 +175,15 @@ def polarized_loss_fn(
     p_le_i_weight : float
         Weight for the optional ``sum(relu(sqrt(Q^2+U^2+V^2) - I)^2)`` penalty
         (default 0.0 -> disabled).
+    flux_target : float or None
+        Known total flux [Jy]. When set, adds
+        ``flux_weight * mean_t(((sum_p I[p, t] - flux_target) / flux_target)^2)``
+        -- a lightcurve anchor. The array has no zero-spacing baseline, so total
+        flux is only weakly constrained by the data and can otherwise leak into
+        a large-scale haze (and, later, into station gain amplitudes). ``None``
+        disables (default).
+    flux_weight : float
+        Weight of the total-flux anchor.
 
     Returns
     -------
@@ -179,7 +191,8 @@ def polarized_loss_fn(
         Scalar loss.
     aux : dict
         ``{"chi2_vis": {key: value}, "neg_I": value, "p_penalty": value,
-        "basis": basis}`` -- ``chi2_vis`` keyed by Stokes or product per ``basis``.
+        "flux_penalty": value, "basis": basis}`` -- ``chi2_vis`` keyed by Stokes
+        or product per ``basis``.
     """
     images, modes = model.stokes_fields(xy, time_indices, frame_max, frame_min)
     vis_stokes = {
@@ -216,5 +229,25 @@ def polarized_loss_fn(
     else:
         p_penalty = jnp.asarray(0.0)
 
-    total = sum(chi2.values()) + neg_weight * neg_i + p_le_i_weight * p_penalty + sparse_total
-    return total, {"chi2_vis": chi2, "neg_I": neg_i, "p_penalty": p_penalty, "basis": basis}
+    if flux_target is not None:
+        # total-flux (lightcurve) anchor: images are Jy/pixel, so the per-frame
+        # pixel sum is the model's zero-spacing flux
+        tot_flux = jnp.sum(images["I"], axis=0)  # (T,)
+        flux_penalty = jnp.mean(((tot_flux - flux_target) / flux_target) ** 2)
+    else:
+        flux_penalty = jnp.asarray(0.0)
+
+    total = (
+        sum(chi2.values())
+        + neg_weight * neg_i
+        + p_le_i_weight * p_penalty
+        + flux_weight * flux_penalty
+        + sparse_total
+    )
+    return total, {
+        "chi2_vis": chi2,
+        "neg_I": neg_i,
+        "p_penalty": p_penalty,
+        "flux_penalty": flux_penalty,
+        "basis": basis,
+    }
