@@ -189,6 +189,14 @@ _STOKES_COLS: dict[str, tuple[str, str]] = {
     "V": ("vvis", "vsigma"),
 }
 
+# Correlation product -> (visibility, sigma) columns in ehtim's circ-polrep table.
+_PRODUCT_COLS: dict[str, tuple[str, str]] = {
+    "RR": ("rrvis", "rrsigma"),
+    "LL": ("llvis", "llsigma"),
+    "RL": ("rlvis", "rlsigma"),
+    "LR": ("lrvis", "lrsigma"),
+}
+
 
 def load_uvfits_to_products(
     path: str | Path,
@@ -196,12 +204,20 @@ def load_uvfits_to_products(
     fov_uas: float,
     *,
     stokes: tuple[str, ...] = ("I", "Q", "U"),
+    basis: str = "stokes",
+    products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     tavg: float = 0.0,
     syserr: float = 0.0,
     flag_sites: tuple[str, ...] = (),
     t_gather: float | None = None,
 ) -> ObsProducts:
     """Load a UVFITS file into an :class:`ObsProducts`.
+
+    The container keys depend on ``basis``: ``"stokes"`` yields ``stokes``
+    (I/Q/U/V) read from ehtim's stokes-polrep table; ``"circular"`` yields
+    ``products`` (RR/LL/RL/LR) read from the circ-polrep table with their
+    independent per-hand sigma (the noise-faithful basis for the circular loss).
+    The shared operator ``A`` is polarization-independent and identical in both.
 
     Pipeline (mirrors NeuralDMD's own ``data/generation.py``):
     ``load_uvfits -> switch_polrep('stokes') -> flag -> avg_coherent ->
@@ -251,12 +267,18 @@ def load_uvfits_to_products(
     import ehtim as eh
     from ehtim.imaging.imager_utils import chisqdata
 
-    unknown = set(stokes) - _STOKES_COLS.keys()
+    if basis == "stokes":
+        keys, cols = tuple(stokes), _STOKES_COLS
+    elif basis == "circular":
+        keys, cols = tuple(products), _PRODUCT_COLS
+    else:
+        raise ValueError(f"basis must be 'stokes' or 'circular', got {basis!r}")
+    unknown = set(keys) - cols.keys()
     if unknown:
-        raise ValueError(f"unknown Stokes requested: {sorted(unknown)}")
+        raise ValueError(f"unknown {basis} products requested: {sorted(unknown)}")
 
     obs = eh.obsdata.load_uvfits(str(path))
-    obs = obs.switch_polrep("stokes")
+    obs = obs.switch_polrep("stokes")  # for A and (stokes basis) targets
     if flag_sites:
         obs = obs.flag_sites(list(flag_sites))
     if tavg > 0:
@@ -271,26 +293,29 @@ def load_uvfits_to_products(
     # Per-frame extraction (ragged in the visibility axis; padded below).
     A_frames: list[np.ndarray] = []
     bl_frames: list[np.ndarray] = []
-    t_frames: dict[str, list[np.ndarray]] = {s: [] for s in stokes}
-    s_frames: dict[str, list[np.ndarray]] = {s: [] for s in stokes}
-    m_frames: dict[str, list[np.ndarray]] = {s: [] for s in stokes}
+    t_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
+    s_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
+    m_frames: dict[str, list[np.ndarray]] = {k: [] for k in keys}
 
     for f in frames:
         # Shared operator; chisqdata's row order matches f.data row order (verified).
         _, _, A = chisqdata(f, prior, mask=[], pol="I", dtype="vis")
         A_frames.append(np.asarray(A, dtype=np.complex64))
-        d = f.data
         bl_frames.append(
-            np.array([[site_to_id[str(r[2])], site_to_id[str(r[3])]] for r in d], dtype=np.int32)
+            np.array(
+                [[site_to_id[str(r[2])], site_to_id[str(r[3])]] for r in f.data], dtype=np.int32
+            )
         )
-        for s in stokes:
-            vcol, scol = _STOKES_COLS[s]
+        # circular targets come from the same rows re-expressed in the circ basis
+        d = f.data if basis == "stokes" else f.switch_polrep("circ").data
+        for k in keys:
+            vcol, scol = cols[k]
             t = np.asarray(d[vcol], dtype=np.complex64)
             sig = np.asarray(d[scol], dtype=np.float32)
             valid = np.isfinite(t.real) & np.isfinite(t.imag) & np.isfinite(sig) & (sig > 0)
-            t_frames[s].append(np.where(valid, t, 0).astype(np.complex64))
-            s_frames[s].append(np.where(valid, sig, 1e6).astype(np.float32))
-            m_frames[s].append(valid.astype(np.float32))
+            t_frames[k].append(np.where(valid, t, 0).astype(np.complex64))
+            s_frames[k].append(np.where(valid, sig, 1e6).astype(np.float32))
+            m_frames[k].append(valid.astype(np.float32))
 
     # Pad + stack to (T, M_max, ...); padding matches data/generation.py (sigma 1e6).
     n_t = len(frames)
@@ -298,21 +323,21 @@ def load_uvfits_to_products(
     n_pix = npix * npix
     A = np.zeros((n_t, m_max, n_pix), dtype=np.complex64)
     bl = np.full((n_t, m_max, 2), -1, dtype=np.int32)
-    targets = {s: np.zeros((n_t, m_max), dtype=np.complex64) for s in stokes}
-    sigmas = {s: np.full((n_t, m_max), 1e6, dtype=np.float32) for s in stokes}
-    masks = {s: np.zeros((n_t, m_max), dtype=np.float32) for s in stokes}
+    targets = {k: np.zeros((n_t, m_max), dtype=np.complex64) for k in keys}
+    sigmas = {k: np.full((n_t, m_max), 1e6, dtype=np.float32) for k in keys}
+    masks = {k: np.zeros((n_t, m_max), dtype=np.float32) for k in keys}
     for i in range(n_t):
         m = A_frames[i].shape[0]
         A[i, :m] = A_frames[i]
         bl[i, :m] = bl_frames[i]
-        for s in stokes:
-            targets[s][i, :m] = t_frames[s][i]
-            sigmas[s][i, :m] = s_frames[s][i]
-            masks[s][i, :m] = m_frames[s][i]
+        for k in keys:
+            targets[k][i, :m] = t_frames[k][i]
+            sigmas[k][i, :m] = s_frames[k][i]
+            masks[k][i, :m] = m_frames[k][i]
 
     return ObsProducts(
         A,
-        stokes,
+        keys,
         targets,
         sigmas,
         masks,

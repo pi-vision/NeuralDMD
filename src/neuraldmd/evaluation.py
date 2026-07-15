@@ -54,7 +54,9 @@ def plot_modes(W, height, width, file_dir=None, title="Mode", part="real"):
         vmax = np.abs(mode_i).max()
         vmin = 0.0 if part == "abs" else -vmax
         cmap = "inferno" if part == "abs" else "RdBu_r"
-        im = axes[i].imshow(mode_i, cmap=cmap, norm=Normalize(vmin=vmin, vmax=vmax))
+        im = axes[i].imshow(
+            mode_i, cmap=cmap, norm=Normalize(vmin=vmin, vmax=vmax), interpolation="bicubic"
+        )
         axes[i].set_title(f"{title} {i}", fontsize=10)
         axes[i].axis("off")
         divider = make_axes_locatable(axes[i])
@@ -115,7 +117,7 @@ def plot_frames(frame_list, titles=None, suptitle=None, file_path=None, vmax=Non
     fig, axes = plt.subplots(1, n, figsize=(3 * n, 3))
     axes = np.atleast_1d(axes)
     for i, (ax, f) in enumerate(zip(axes, frame_list, strict=False)):
-        ax.imshow(f, cmap="afmhot", vmin=0, vmax=vmax)
+        ax.imshow(f, cmap="afmhot", vmin=0, vmax=vmax, interpolation="bicubic")
         if titles:
             ax.set_title(titles[i], fontsize=10)
         ax.axis("off")
@@ -238,3 +240,227 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
         "chi2_amp": float(chi2_amp_num / masks.sum()),
         "chi2_cp": float(cp_num / cp_masks.sum()),
     }
+
+
+# ---------------------------------------------------------------------------
+# Polarized reconstruction metrics (Milestone M2)
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=np.pi, fov_y=np.pi):
+    """Reconstruct per-Stokes image cubes from a ``PolarizedNeuralDMD``.
+
+    Each sub-model is evaluated with its own physical scaling.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+    npix : int
+        Image grid side length.
+    times : array-like
+        ``(T,)`` normalized frame times.
+    frame_max, frame_min : dict of str -> float
+        Per-Stokes output scaling (same dicts used for training).
+    fov_x, fov_y : float
+        Network coordinate extents (must match the loader).
+
+    Returns
+    -------
+    dict of str -> numpy.ndarray
+        ``{stokes: (T, npix, npix)}`` reconstructed cubes.
+    """
+    xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
+    times = jnp.asarray(np.asarray(times, dtype=np.float32))
+    images, _ = model.stokes_fields(xy, times, frame_max, frame_min)
+    return {s: np.asarray(images[s]).T.reshape(len(times), npix, npix) for s in images}
+
+
+def polarized_nrmse(recon, truth):
+    """Per-Stokes normalized RMSE ``||recon - truth|| / ||truth||`` (Frobenius)."""
+    out = {}
+    for s in recon:
+        r, t = np.asarray(recon[s]), np.asarray(truth[s])
+        denom = np.linalg.norm(t)
+        out[s] = float(np.linalg.norm(r - t) / denom) if denom > 0 else float("nan")
+    return out
+
+
+def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
+    """Median EVPA error [degrees] where the truth polarized intensity is bright.
+
+    Compares ``0.5*atan2(U, Q)`` of the reconstruction and the truth over pixels
+    with ``P_truth > frac_thresh * P_truth.max()``, wrapping the angular
+    difference into ``(-90, 90]`` degrees before taking the median absolute value.
+    """
+    from .physics.stokes import evpa, linear_polarized_intensity
+
+    tq, tu = np.asarray(truth["Q"]), np.asarray(truth["U"])
+    rq, ru = np.asarray(recon["Q"]), np.asarray(recon["U"])
+    p = linear_polarized_intensity(tq, tu)
+    mask = p > frac_thresh * p.max()
+    if not mask.any():
+        return float("nan")
+    diff = evpa(rq, ru)[mask] - evpa(tq, tu)[mask]
+    diff = (diff + np.pi / 2) % np.pi - np.pi / 2  # wrap to (-pi/2, pi/2]
+    return float(np.degrees(np.median(np.abs(diff))))
+
+
+def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, skip=None):
+    """Overlay EVPA ticks on a Stokes-I background (EHT dynamics-plot convention).
+
+    Ticks point along ``(-sin chi, cos chi)`` with ``chi = 0.5*angle(Q + iU)``,
+    have length proportional to the polarized intensity, and are colored by the
+    fractional polarization; the intensity map uses ``afmhot`` with RA increasing
+    to the left. Ticks are masked where I or P is below 10% of its peak.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Target axes.
+    intensity, q, u : numpy.ndarray
+        ``(H, W)`` Stokes I, Q, U maps for a single frame.
+    fov_uas : float
+        Field of view [micro-arcsec] setting the tick geometry.
+    cmap_bg : str, optional
+        Background colormap for Stokes I. Default ``"afmhot"``.
+    vmax : float or None, optional
+        Upper limit of the intensity color scale (``None`` autoscales).
+    skip : int or None, optional
+        Draw one tick every ``skip`` pixels (default ``~W/20``).
+
+    Returns
+    -------
+    tuple of (matplotlib.quiver.Quiver, matplotlib.image.AxesImage)
+        The tick and background-image artists.
+    """
+    from matplotlib.colors import Normalize
+
+    intensity = np.asarray(intensity)
+    q, u = np.asarray(q), np.asarray(u)
+    _, nx = intensity.shape
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+    bg = ax.imshow(
+        intensity,
+        cmap=cmap_bg,
+        origin="upper",
+        vmin=0.0,
+        vmax=vmax,
+        extent=lims,
+        interpolation="bicubic",
+    )
+
+    px = fov_uas / nx
+    yy, xx = np.mgrid[slice(-fov_uas / 2, fov_uas / 2, px), slice(-fov_uas / 2, fov_uas / 2, px)]
+    amp = np.sqrt(q**2 + u**2)
+    scal = float(amp.max() * 0.5) or 1.0
+    angle = np.angle(q + 1j * u)
+    vx = -np.sin(angle / 2) * amp / scal
+    vy = np.cos(angle / 2) * amp / scal
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mfrac = amp / np.abs(intensity)
+
+    imax = float(np.abs(intensity).max()) or 1.0
+    qumax = float(amp.max()) or 1.0
+    mask = (np.abs(intensity) < 0.1 * imax) | (amp < 0.1 * qumax)
+    vx = np.ma.masked_where(mask, vx)
+    vy = np.ma.masked_where(mask, vy)
+    mfrac = np.ma.masked_where(mask, mfrac)
+
+    if skip is None:
+        skip = max(1, nx // 20)
+    quiv = ax.quiver(
+        -xx[::skip, ::skip],
+        -yy[::skip, ::skip],
+        vx[::skip, ::skip],
+        vy[::skip, ::skip],
+        mfrac[::skip, ::skip],
+        cmap="rainbow",
+        norm=Normalize(vmin=0.0, vmax=0.5),
+        headlength=0,
+        headwidth=1,
+        pivot="mid",
+        scale=16,
+        width=0.01,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return quiv, bg
+
+
+def plot_polarized_summary(recon, truth, path, frame=None, fov_uas=200.0):
+    """Save a truth-vs-reconstruction figure: time-mean (or one frame) I/Q/U maps
+    plus a Stokes-I image overlaid with EVPA ticks (EHT dynamics-plot style)."""
+
+    def pick(cube):
+        cube = np.asarray(cube)
+        return cube.mean(0) if frame is None else cube[frame]
+
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    for col, s in enumerate(["I", "Q", "U"]):
+        cmap = "afmhot" if s == "I" else "coolwarm"
+        for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
+            axes[row, col].imshow(
+                pick(cube[s]), cmap=cmap, origin="upper", extent=lims, interpolation="bicubic"
+            )
+            axes[row, col].set_title(f"{label} {s}")
+            axes[row, col].axis("off")
+
+    for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
+        ax = axes[row, 3]
+        _evpa_quiver(ax, pick(cube["I"]), pick(cube["Q"]), pick(cube["U"]), fov_uas)
+        ax.set_title(f"{label} I + EVPA")
+        ax.axis("off")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
+    """Animate a polarized reconstruction (EHT dynamics-plot style): per-frame
+    Stokes I with EVPA ticks colored by fractional polarization, length
+    proportional to polarized intensity.
+
+    Parameters
+    ----------
+    cubes : dict of str -> numpy.ndarray
+        ``{"I": (T, H, W), "Q": ..., "U": ...}`` reconstruction (or truth).
+    path : str
+        Output GIF path.
+    fps : int, optional
+        Frames per second. Default 10.
+    cmap : str, optional
+        Background colormap for Stokes I. Default ``"afmhot"``.
+    fov_uas : float, optional
+        Field of view [micro-arcsec] for the tick geometry. Default 200.
+    """
+    intensity = np.asarray(cubes["I"])
+    q = np.asarray(cubes["Q"]) if "Q" in cubes else None
+    u = np.asarray(cubes["U"]) if "U" in cubes else None
+    n_t = intensity.shape[0]
+    vmax = float(intensity.max()) or 1.0
+
+    frames = []
+    for t in range(n_t):
+        fig, ax = plt.subplots(figsize=(4, 4), dpi=100)
+        if q is not None and u is not None:
+            _evpa_quiver(ax, intensity[t], q[t], u[t], fov_uas, cmap_bg=cmap, vmax=vmax)
+        else:
+            lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+            ax.imshow(
+                intensity[t],
+                cmap=cmap,
+                origin="upper",
+                vmin=0.0,
+                vmax=vmax,
+                extent=lims,
+                interpolation="bicubic",
+            )
+        ax.axis("off")
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
+    print(f"Saved {path}")

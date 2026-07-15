@@ -238,3 +238,24 @@ class NeuralDMD(eqx.Module):
             I_stat * scale + frame_min,
             I_dyn * scale,
         )
+
+
+def physical_intensities(model: NeuralDMD, xy, time_indices, frame_max, frame_min):
+    """Physical-unit intensities ``(P, T)`` and modes ``(W0, W, b0, b)`` for one model.
+
+    The same reconstruction the loss uses, factored out so the scalar and both
+    polarized models share one code path.
+
+    Returns
+    -------
+    intensities : jax.Array
+        ``(P, T)`` = ``(W0 b0 + 2 Re[sum_k W_k b_k e^{Omega_k t}]) * scale + min``.
+    modes : tuple
+        ``(W0, W, b0, b)`` for the sparsity penalties.
+    """
+    W0, W, Omega, b0, b = model(xy)
+    lambda_exp = jnp.exp(Omega[:, None] * time_indices[None, :] * model.t_scale)
+    i_stat = W0[:, 0:1] * b0[0]
+    i_dyn = 2 * jnp.real(jnp.einsum("pr,rt,r->pt", W, lambda_exp, b))
+    intensities = (i_stat + i_dyn) * (frame_max - frame_min) + frame_min
+    return intensities, (W0, W, b0, b)

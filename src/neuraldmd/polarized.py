@@ -1,0 +1,165 @@
+"""Polarized NeuralDMD: polarization parameterized as a *fraction of Stokes I*.
+
+Stokes I is a NeuralDMD field; the linear polarization is derived from it as
+
+    Q = m_l * I * cos(2 xi),    U = m_l * I * sin(2 xi),    V = m_c * I,
+
+with the fractional magnitude and EVPA direction produced by additional NeuralDMD
+raw fields passed through bounded activations. This ties polarization to the total
+intensity (pol only where I is), enforces the physical bound ``P <= I`` by
+construction, and -- via an output bias -- starts the source *unpolarized* and
+grows polarization as the cross-hand data demand it. Crucially the model
+*multiplies* by I (never divides), so the likelihood stays on absolute Stokes (or
+correlation products).
+
+Why this and not free (Q, U) fields: a physical Stokes vector obeys
+``P = sqrt(Q^2+U^2+V^2) <= I`` and ``Q=U=V=0 where I=0``. Free (Q, U) fields
+violate both -- they can fit sparse visibilities to chi^2 ~ 1 while producing
+unphysical polarization images. ``(I, m_l, xi)`` is the same three degrees of
+freedom in the coordinate chart where those constraints are a simple box on
+``m_l``. See ``docs/polarization_parameterization.tex``.
+"""
+
+from __future__ import annotations
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+from .config import StokesConfig
+from .model import NeuralDMD, physical_intensities
+
+
+class PolarizedNeuralDMD(eqx.Module):
+    """Polarized model with polarization parameterized as a fraction of I.
+
+    Sub-models (each a :class:`NeuralDMD` raw field, mapped through a bounded
+    activation)::
+
+        m_l              = sigmoid(raw - outshift) * scaling_ml   in [0, scaling_ml]
+        (cos2xi, sin2xi) = (c_raw, s_raw) / ||(c_raw, s_raw)||     unit EVPA direction
+        m_c              = (sigmoid(raw - outshift) - 0.5) * 2     in [-1, 1]   (V only)
+
+    Because the EVPA direction is unit-normalized, ``P = sqrt(Q^2+U^2) = m_l*|I|``
+    exactly, so ``P <= scaling_ml*|I| <= I`` holds strictly. ``outshift`` biases
+    ``m_l`` small at init (a modest initial polarization). NB: too large an
+    ``outshift`` saturates the sigmoid and starves its gradient, so polarization
+    never grows -- with the gauge-fixed O(1) raw scale, ``~2`` works well (``10``
+    leaves the fit unpolarized, RL/LR chi^2 huge).
+
+    Attributes
+    ----------
+    intensity : NeuralDMD
+        Stokes-I field (physical scaling via frame_max/frame_min; disk-pretrainable).
+    frac, cos2xi, sin2xi : NeuralDMD
+        Raw fields for ``m_l`` and the EVPA direction.
+    circ : NeuralDMD or None
+        Raw field for ``m_c`` (present iff V is modeled).
+    stokes : tuple of str
+        Stokes produced (static). ``outshift``, ``scaling_ml`` are static controls.
+    """
+
+    intensity: NeuralDMD
+    frac: NeuralDMD
+    cos2xi: NeuralDMD
+    sin2xi: NeuralDMD
+    circ: NeuralDMD | None
+    stokes: tuple[str, ...] = eqx.field(static=True)
+    outshift: float = eqx.field(static=True)
+    scaling_ml: float = eqx.field(static=True)
+
+    def __init__(
+        self,
+        stokes: tuple[str, ...] | StokesConfig,
+        r: int,
+        *,
+        key: jax.Array,
+        outshift: float = 2.0,
+        scaling_ml: float = 1.0,
+        **model_kwargs,
+    ):
+        """Build the I field and the fractional-pol fields from independent split keys.
+
+        Parameters
+        ----------
+        stokes : tuple of str or StokesConfig
+            Must contain I; Q/U enable linear pol, V enables circular pol.
+        r : int
+            Complex DMD modes per field.
+        key : jax.Array
+            PRNG key (split per field).
+        outshift : float
+            Sigmoid bias for ``m_l``/``m_c`` -> unpolarized initialization.
+        scaling_ml : float
+            Cap on the linear polarization fraction (``<= 1``).
+        **model_kwargs
+            Forwarded to every :class:`NeuralDMD`.
+        """
+        cfg = stokes if isinstance(stokes, StokesConfig) else StokesConfig(tuple(stokes))
+        self.stokes = cfg.stokes
+        self.outshift = float(outshift)
+        self.scaling_ml = float(scaling_ml)
+        want_v = "V" in self.stokes
+        keys = jax.random.split(key, 5 if want_v else 4)
+        self.intensity = NeuralDMD(r=r, key=keys[0], **model_kwargs)
+        self.frac = NeuralDMD(r=r, key=keys[1], **model_kwargs)
+        self.cos2xi = NeuralDMD(r=r, key=keys[2], **model_kwargs)
+        self.sin2xi = NeuralDMD(r=r, key=keys[3], **model_kwargs)
+        self.circ = NeuralDMD(r=r, key=keys[4], **model_kwargs) if want_v else None
+
+    def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
+        """Physical per-Stokes image cubes and per-network modes (loss/eval interface).
+
+        Parameters
+        ----------
+        xy : jax.Array
+            ``(P, 2)`` pixel coordinates.
+        times : jax.Array
+            ``(T,)`` normalized frame times.
+        frame_max, frame_min : dict of str -> float
+            Output scaling for Stokes I (only the ``"I"`` entry is used; the pol
+            fields are bounded by their own activations).
+
+        Returns
+        -------
+        images : dict of str -> jax.Array
+            ``{stokes: (P, T)}`` with ``Q=m_l*I*cos2xi``, ``U=m_l*I*sin2xi``,
+            ``V=m_c*I``.
+        modes : list of tuple
+            ``(W0, W, b0, b)`` per sub-network, for the sparsity penalty.
+        """
+        i_img, i_modes = physical_intensities(
+            self.intensity, xy, times, frame_max["I"], frame_min["I"]
+        )
+        ml_raw, ml_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
+        c_raw, c_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
+        s_raw, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)
+        # m_l in [0, scaling_ml]; outshift -> m_l ~ 0 at init (unpolarized)
+        m_l = jax.nn.sigmoid(ml_raw - self.outshift) * self.scaling_ml
+        # EVPA direction as a UNIT vector (cos2xi^2 + sin2xi^2 = 1), so that
+        # P = sqrt(Q^2+U^2) = m_l*|I| exactly -> P <= scaling_ml*|I| <= I (strict).
+        norm = jnp.sqrt(c_raw**2 + s_raw**2 + 1e-8)
+        cos2xi = c_raw / norm
+        sin2xi = s_raw / norm
+
+        images = {"I": i_img}
+        modes = [i_modes, ml_modes, c_modes, s_modes]
+        if "Q" in self.stokes:
+            images["Q"] = m_l * i_img * cos2xi
+        if "U" in self.stokes:
+            images["U"] = m_l * i_img * sin2xi
+        if self.circ is not None:
+            v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+            m_c = (jax.nn.sigmoid(v_raw - self.outshift) - 0.5) * 2.0
+            images["V"] = m_c * i_img
+            modes.append(v_modes)
+        return images, modes
+
+    @property
+    def i_submodel(self) -> NeuralDMD:
+        """The Stokes-I :class:`NeuralDMD` (target of disk-template pretraining)."""
+        return self.intensity
+
+    def replace_i_submodel(self, new_i: NeuralDMD) -> PolarizedNeuralDMD:
+        """Return a copy with the Stokes-I field replaced (e.g. by a pretrained one)."""
+        return eqx.tree_at(lambda m: m.intensity, self, new_i)

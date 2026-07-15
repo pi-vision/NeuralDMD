@@ -620,6 +620,141 @@ def generate(cfg: Config):
     return cfg.outdir
 
 
+def generate_polarized_dataset(
+    out_dir,
+    *,
+    npix: int = 50,
+    fov_uas: float = 200.0,
+    num_frames: int = 64,
+    tstart_hr: float = 9.0,
+    tstop_hr: float = 15.0,
+    tint: float = 30.0,
+    bw: float = 2.0e9,
+    linpol_frac: float = 0.2,
+    fractional_noise: float = 0.04,
+    ampcal: bool = True,
+    phasecal: bool = True,
+    array_name: str = "EHT2017",
+    array_dir=None,
+    stokes: tuple[str, ...] = ("I", "Q", "U"),
+    basis: str = "stokes",
+    ttype: str = "direct",
+    seed: int = 42,
+    save_truth: bool = True,
+    **mring_kwargs,
+):
+    """Generate the canonical polarized ``mring+hsCW`` dataset and write a v2 obs_dir.
+
+    Pipeline: build the polarized m-ring + hot-spot movie
+    (:func:`neuraldmd.data.movies.make_mring_hs_pol_movie`, an ehtim thick m-ring
+    with radial-EVPA polarization and an orbiting hot spot) at the model grid,
+    observe it with the EHT array (Stokes polrep, thermal + optional fractional
+    noise), save ``obs.uvfits``, ingest via :func:`load_uvfits_to_products` in the
+    requested ``basis``, and write the obs_dir. Requires ehtim.
+
+    Parameters
+    ----------
+    out_dir : str or pathlib.Path
+        Output directory (obs_dir + ``obs.uvfits`` + ``truth_pol.npz``).
+    npix, fov_uas, num_frames, tstart_hr, tstop_hr, tint, bw
+        Image grid, field of view, sampling, integration time [s], bandwidth [Hz].
+    linpol_frac : float
+        Fractional linear polarization of the ring.
+    fractional_noise : float
+        Fractional systematic noise added in quadrature (0 disables).
+    ampcal, phasecal : bool
+        If False, ehtim injects amplitude/phase gain errors (for later cal work).
+    array_name, array_dir : str, path
+        Telescope array (defaults to the packaged EHT2017).
+    stokes, basis : passed to :func:`load_uvfits_to_products`.
+    ttype : str
+        ehtim Fourier type; ``"direct"`` gives the dense operator the loader needs.
+    seed : int
+        Observation noise seed.
+    save_truth : bool
+        Save ``truth_pol.npz`` (I, Q, U cubes + normalized frame times).
+    **mring_kwargs
+        m-ring / hot-spot / polarization overrides for
+        :func:`make_mring_hs_pol_movie` (``diameter_uas``, ``alpha_uas``,
+        ``beta1_abs``, ``period_min``, ``direction``, ``circpol_frac``, ...).
+
+    Returns
+    -------
+    ObsProducts
+        The ingested dataset (also written to ``out_dir``).
+    """
+    import ehtim as eh
+
+    from .movies import make_mring_hs_pol_movie
+    from .observations import load_uvfits_to_products
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    array_dir = Path(array_dir) if array_dir is not None else Path(__file__).parent / "arrays"
+    array = eh.array.load_txt(str(array_dir / f"{array_name}.txt"))
+
+    movie = make_mring_hs_pol_movie(
+        npix=npix,
+        fov_uas=fov_uas,
+        num_frames=num_frames,
+        tstart_hr=tstart_hr,
+        tstop_hr=tstop_hr,
+        linpol_frac=linpol_frac,
+        **mring_kwargs,
+    )
+
+    tadv = float((tstop_hr - tstart_hr) * 3600.0 / max(num_frames - 1, 1))
+    obs = movie.observe(
+        array,
+        tint,
+        tadv,
+        tstart_hr,
+        tstop_hr,
+        bw,
+        polrep_obs="stokes",
+        ttype=ttype,
+        add_th_noise=True,
+        ampcal=ampcal,
+        phasecal=phasecal,
+        seed=seed,
+        verbose=False,
+    )
+    if fractional_noise:
+        obs = obs.add_fractional_noise(fractional_noise)
+
+    uvfits_path = out_dir / "obs.uvfits"
+    obs.save_uvfits(str(uvfits_path))
+
+    op = load_uvfits_to_products(
+        uvfits_path, npix=npix, fov_uas=fov_uas, stokes=tuple(stokes), basis=basis
+    )
+    op.to_obs_dir(out_dir)
+
+    if save_truth:
+        # ground-truth Stokes cubes (T, npix, npix) from the movie frames, with
+        # normalized [0, 1] frame times matching the loader default.
+        ims = movie.im_list()
+
+        def _cube(attr):
+            return np.stack(
+                [np.asarray(getattr(im, attr)).reshape(npix, npix) for im in ims]
+            ).astype(np.float32)
+
+        mtimes = np.array([float(im.time) for im in ims])
+        span = float(mtimes.max() - mtimes.min())
+        tnorm = (mtimes - mtimes.min()) / (span if span > 0 else 1.0)
+        np.savez(
+            out_dir / "truth_pol.npz",
+            I=_cube("imvec"),
+            Q=_cube("qvec"),
+            U=_cube("uvec"),
+            times=tnorm.astype(np.float32),
+            npix=npix,
+            fov_uas=fov_uas,
+        )
+    return op
+
+
 if __name__ == "__main__":
     import argparse
 

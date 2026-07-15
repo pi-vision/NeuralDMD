@@ -1,0 +1,125 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\title{Polarization parameterization for NeuralDMD:\\
+why we fit $(I,\,m_\ell,\,\xi)$ rather than free $(I,\,Q,\,U)$}
+\author{Sgr\,A$^\ast$ dynamics / NeuralDMD polarization effort}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We record the reasoning behind modeling linear polarization in NeuralDMD as a
+\emph{fraction of Stokes~$I$} rather than as three free Stokes fields. The two
+representations describe the identical degrees of freedom; the fractional chart is
+simply the one in which the physical constraint $P\le I$ becomes a box bound (a
+single sigmoid) and in which polarization is structurally tied to the total
+intensity. This fixes an empirical failure we observed with free $(Q,U)$: the
+fit reached $\chi^2\!\approx\!1$ on the visibilities while producing unphysical
+polarization images.
+\end{abstract}
+
+\section{The problem}
+Polarimetric VLBI inversion from sparse coverage is severely ill-posed:
+many images reproduce the handful of measured cross-hand visibilities equally
+well. If Stokes $Q$ and $U$ are modeled as \emph{free, independent} image fields,
+the reconstruction is free to place polarized flux anywhere the data permit,
+including in physically forbidden configurations. In a controlled synthetic test
+(simultaneous $I,Q,U$; circular-basis $\chi^2$) a free-$(Q,U)$ model reached
+$\chi^2_{RR,LL,RL,LR}\!\approx\!1$ yet gave normalized image errors
+$\mathrm{NRMSE}_{Q,U}>1$ (worse than a null map) and an electric-vector position
+angle (EVPA) error of $\sim\!30^\circ$. The visibilities were fit; the images were
+not physical.
+
+\section{Physical constraints on the Stokes vector}
+At every pixel and time the Stokes vector $(I,Q,U,V)$ of physical radiation obeys
+two hard constraints:
+\begin{align}
+  P \;\equiv\; \sqrt{Q^2+U^2+V^2} \;&\le\; I, \label{eq:ple}\\
+  I=0 \;&\Rightarrow\; Q=U=V=0. \label{eq:support}
+\end{align}
+Equation~\eqref{eq:ple} states that the polarized intensity cannot exceed the
+total intensity (the fractional polarization $m=P/I\in[0,1]$; a source cannot be
+more than $100\%$ polarized). Equation~\eqref{eq:support}, a corollary, forbids
+polarized flux where there is no total flux. A free-$(Q,U)$ model can violate
+both.
+
+\section{Two coordinate charts for the same degrees of freedom}
+A physical (linear) polarization state has three real degrees of freedom per
+pixel. These can be coordinatized as $(I,Q,U)$ \emph{or} as $(I,m_\ell,\xi)$,
+where $m_\ell$ is the linear polarization fraction and $\xi$ the EVPA:
+\begin{equation}
+  Q = m_\ell\,I\,\cos 2\xi,\qquad
+  U = m_\ell\,I\,\sin 2\xi,
+  \label{eq:transform}
+\end{equation}
+with inverse $m_\ell=\sqrt{Q^2+U^2}/I$ and $\xi=\tfrac12\operatorname{atan2}(U,Q)$.
+This is a change of variables, exactly like Cartesian $\leftrightarrow$ polar
+coordinates. Neither $m_\ell$ nor $\xi$ is ``independent'' of $Q,U$---both are
+functions of them---and no information is added or removed. What differs is the
+\emph{shape of the physical region}:
+\begin{itemize}
+  \item In $(I,Q,U)$ coordinates the constraint~\eqref{eq:ple} is the nonlinear
+  coupling $\sqrt{Q^2+U^2}\le I$; free fields ignore it.
+  \item In $(I,m_\ell,\xi)$ coordinates the \emph{same} constraint is the box
+  $m_\ell\in[0,1]$---enforced by one sigmoid---and $m_\ell\in[0,1]$ maps
+  \emph{exactly} onto the physical region of $(I,Q,U)$ space, no more and no less.
+  Support~\eqref{eq:support} is automatic because $Q,U\propto I$.
+\end{itemize}
+As a bonus, $m_\ell$ (fraction) and $\xi$ (angle) are the quantities that distinct
+physics controls---emission/absorption set $I$, while magnetic-field geometry and
+Faraday effects set the fraction and angle---so priors and initialization are
+natural in this chart.
+
+\section{The parameterization we adopt}
+Each field is the raw output of a NeuralDMD sub-model, mapped through a bounded
+activation:
+\begin{align}
+  m_\ell(x,t) &= \sigma\!\big(f_{m}(x,t) - s\big)\,\kappa,
+    &&\kappa \le 1,\ \ s=\text{outshift}, \label{eq:ml}\\
+  (\cos 2\xi,\ \sin 2\xi) &=
+    \frac{(f_{c},\ f_{s})}{\sqrt{f_{c}^2+f_{s}^2+\epsilon}},
+    &&\text{(unit EVPA direction)} \label{eq:evpa}\\
+  m_c(x,t) &= 2\big(\sigma(f_{v}-s)-\tfrac12\big),
+    &&V = m_c\,I\ \ \text{(optional)} \label{eq:mc}
+\end{align}
+with $\sigma$ the logistic sigmoid. Stokes $Q,U$ follow from~\eqref{eq:transform}.
+
+Two properties matter:
+\begin{enumerate}
+  \item \textbf{Strict $P\le I$.} Because the EVPA direction in~\eqref{eq:evpa} is
+  unit-normalized, $P=\sqrt{Q^2+U^2}=m_\ell\,|I|$ \emph{exactly}, so
+  $P\le\kappa\,|I|\le I$. (Modeling $\cos2\xi,\sin2\xi$ as two independent
+  bounded outputs would instead allow $P$ up to $\sqrt2\,m_\ell I$, which can
+  violate the bound; the normalization removes that loophole.)
+  \item \textbf{Small-polarization initialization.} The bias $s$ pushes $m_\ell$
+  small at initialization, so the source starts nearly unpolarized and grows
+  polarization only as the cross-hand data demand it---the natural analogue of the
+  disk-template pretraining we apply to $I$. The value of $s$ must be matched to
+  the raw-field scale: with the gauge-fixed, $O(1)$ raw fields used here,
+  $s\!\approx\!2$ gives a small but trainable $m_\ell$, whereas a large $s$
+  (e.g.\ $s\!=\!10$) saturates the sigmoid, starves its gradient, and leaves the
+  reconstruction stuck at zero polarization.
+\end{enumerate}
+
+\section{Compatibility with ``never divide by $I$''}
+A frequent, valid objection to fractional parameterizations is the numerical
+hazard of dividing by $I$ (which can vanish). We never do: the model
+\emph{multiplies}, $Q=m_\ell I\cos2\xi$, and the likelihood is formed on the
+absolute Stokes visibilities (or, in the circular basis, on $RR,LL,RL,LR$)---not
+on $m_\ell$ or on any quantity requiring $Q/I$. The fractional structure lives
+entirely in the forward model.
+
+\section{Summary}
+Modeling $Q,U$ as free fields over-parameterizes the physical state: it admits
+$P>I$ and polarized flux where $I=0$, which is almost certainly how a
+free-$(Q,U)$ fit reaches $\chi^2\!\approx\!1$ with unphysical images. Fitting in
+the $(I,m_\ell,\xi)$ chart with a sigmoid on $m_\ell$ confines the model to
+exactly the physical manifold, ties polarization to the (separately
+regularized) total intensity, and starts the source unpolarized---while keeping
+the likelihood on absolute Stokes. It is the same three degrees of freedom,
+expressed in the coordinates where ``physical'' means ``box-bounded.''
+\end{document}

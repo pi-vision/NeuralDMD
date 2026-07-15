@@ -25,6 +25,8 @@ import numpy as np
 import optax
 from tqdm import tqdm
 
+from .zernike import build_zernike_targets
+
 
 def radius_of_gyration(video, fov_x=np.pi, fov_y=np.pi):
     """Median flux-weighted RMS radius of a (T, H, W) movie.
@@ -123,6 +125,62 @@ def pretrain_model(
                 print(f"step {step + 1}/{num_steps}  alignment loss {float(loss):.5f}", flush=True)
 
     return model, losses
+
+
+def pretrain_stokes_i(
+    polarized_model,
+    truth_i,
+    fov=np.pi,
+    num_steps=2000,
+    lr=1e-4,
+    radius_scale=1.5,
+    max_n=8,
+    key=None,
+):
+    """Disk-template pretrain the Stokes-I sub-model of a ``PolarizedNeuralDMD``.
+
+    Estimates the source size from ``truth_i`` (radius of gyration), builds
+    Zernike targets on a disk of ``radius_scale * Rg``, and aligns the I
+    sub-model's spatial modes to them -- exactly the Stokes-I baseline recipe,
+    applied only to the ``"I"`` sub-model. Q/U/V are left at their zero-init
+    (signed fields start near zero, which is correct). This gives the polarized
+    fit a well-conditioned image prior that a bare chi2 fit lacks.
+
+    Parameters
+    ----------
+    polarized_model : PolarizedNeuralDMD
+        The model whose ``models["I"]`` sub-model is pretrained.
+    truth_i : numpy.ndarray
+        ``(T, H, W)`` Stokes-I reference movie (for the size estimate). For real
+        data, estimate the extent from visibility amplitudes instead.
+    fov : float
+        Network coordinate extent (must match the loader's ``fov_x``/``fov_y``).
+    num_steps, lr, radius_scale, max_n : pretraining hyperparameters.
+    key : jax.Array or None
+        PRNG key for the coordinate jitter.
+
+    Returns
+    -------
+    model : PolarizedNeuralDMD
+        A copy with the ``"I"`` sub-model replaced by the pretrained one.
+    losses : list of float
+        Alignment-loss history.
+    """
+    model_i = polarized_model.i_submodel
+    _, height, width = np.asarray(truth_i).shape
+    r_g, _ = radius_of_gyration(truth_i, fov_x=fov, fov_y=fov)
+    z_targets, _picked, _mask, xy = build_zernike_targets(
+        height,
+        width,
+        radius_scale * r_g,
+        fov,
+        fov,
+        model_i.r + 1,
+        max_n=max_n,
+        prefer_ms=(0, 1, 2, 3),
+    )
+    trained_i, losses = pretrain_model(model_i, xy, z_targets, num_steps=num_steps, lr=lr, key=key)
+    return polarized_model.replace_i_submodel(trained_i), losses
 
 
 def save_template(model, models_dir):
