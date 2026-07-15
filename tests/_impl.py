@@ -17,6 +17,7 @@ IMPL = os.environ.get("NEURALDMD_IMPL", "monolith")
 
 if IMPL == "package":
     from neuraldmd.data.loader import DMDDataLoader
+    from neuraldmd.encoding import SinusoidalEncoding
     from neuraldmd.evaluation import (
         calc_psnr,
         evaluate_chi2,
@@ -25,15 +26,8 @@ if IMPL == "package":
         sort_modes_by_lambda,
     )
     from neuraldmd.losses import calculate_closure_phases, loss_fn, sparsity_loss
-    from neuraldmd.model import (
-        NeuralDMD,
-        ResBlock,
-        ResidualMLP,
-        SinusoidalEncoding,
-        TemporalBMLP,
-        TemporalOmegaMLP,
-        zero_init_linear,
-    )
+    from neuraldmd.model import NeuralDMD, TemporalBMLP, TemporalOmegaMLP
+    from neuraldmd.networks import ResBlock, ResidualMLP, zero_init_linear
     from neuraldmd.pretraining import (
         _best_complex_scale_residual,
         pretrain_loss_fn,
