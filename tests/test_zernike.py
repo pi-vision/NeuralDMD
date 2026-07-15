@@ -5,7 +5,7 @@ low-|m| mode selection, disk mask.
 from __future__ import annotations
 
 import numpy as np
-from _impl import build_zernike_targets, make_xy_grid, zernike_complex_basis
+from _impl import build_zernike_targets, make_xy_grid, pixel_grid_coords, zernike_complex_basis
 
 
 def test_masked_qr_orthonormal():
@@ -35,3 +35,19 @@ def test_mask_is_unit_disk():
     mask = np.asarray(mask)
     rho = np.sqrt((np.asarray(xy) ** 2).sum(1)) / (np.pi / 2)
     np.testing.assert_array_equal(mask, (rho <= 1.0).astype(np.float32))
+
+
+def test_make_xy_grid_matches_loader_grid():
+    # pretraining targets must live on the SAME grid the model is trained on
+    grid = np.asarray(make_xy_grid(16, 20, np.pi, 2.0))  # non-square H,W and fov
+    ref = pixel_grid_coords(16, 20, np.pi, 2.0)
+    np.testing.assert_allclose(grid, ref, rtol=1e-6)
+
+
+def test_legacy_grid_differs_by_half_pixel():
+    new = np.asarray(make_xy_grid(8, 8, np.pi, np.pi))
+    legacy = np.asarray(make_xy_grid(8, 8, np.pi, np.pi, legacy_grid=True))
+    # legacy uses linspace endpoints; the two grids are offset (not identical)
+    assert not np.allclose(new, legacy)
+    xs = np.linspace(-np.pi / 2, np.pi / 2, 8)
+    np.testing.assert_allclose(legacy[:8, 0], xs, atol=1e-5)  # first row x-sweep
