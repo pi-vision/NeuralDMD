@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import optax
 from tqdm import tqdm
 
-from .losses import loss_fn
+from .losses import loss_fn, polarized_loss_fn
 
 
 @eqx.filter_jit
@@ -112,6 +112,96 @@ def train_epoch_jit(model, opt_state, batch_list, optimizer, key, frame_max, fra
         scan_fn, (model, opt_state, key), jnp.arange(num_batches)
     )
     return model, opt_state, tuple(jnp.mean(x) for x in logs)
+
+
+def make_polarized_optimizer(
+    model,
+    initial_lr: float = 3e-4,
+    weight_decay: float = 1e-4,
+):
+    """Build the AdamW optimizer for a :class:`PolarizedNeuralDMD`.
+
+    A single transform over the whole parameter tree (LR wrapped in
+    ``optax.inject_hyperparams`` so it can be annealed at runtime, as in
+    :func:`train_model`). Per-Stokes freezing (the hierarchical study mode) is
+    applied in :func:`polarized_train_step` via ``frozen_stokes`` -- the frozen
+    sub-models' updates are zeroed there, an exact freeze including weight decay.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        Model whose parameter tree the optimizer state is shaped to.
+    initial_lr : float
+        AdamW learning rate.
+    weight_decay : float
+        AdamW decoupled weight decay.
+
+    Returns
+    -------
+    optax.GradientTransformation
+        Initialize with ``opt.init(eqx.filter(model, eqx.is_array))``.
+    """
+    return optax.inject_hyperparams(optax.adamw)(
+        learning_rate=initial_lr, weight_decay=weight_decay
+    )
+
+
+def _zero_frozen_updates(updates, frozen_stokes: tuple[str, ...]):
+    """Zero the update pytree for each frozen Stokes sub-model (exact freeze)."""
+    replace = [jax.tree_util.tree_map(jnp.zeros_like, updates.models[s]) for s in frozen_stokes]
+    return eqx.tree_at(lambda u: [u.models[s] for s in frozen_stokes], updates, replace=replace)
+
+
+@eqx.filter_jit
+def polarized_train_step(
+    model,
+    opt_state,
+    xy,
+    targets,
+    sigmas,
+    masks,
+    A_batch,
+    time_indices,
+    optimizer,
+    frame_max,
+    frame_min,
+    *,
+    frozen_stokes: tuple[str, ...] = (),
+    basis: str = "stokes",
+    products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
+    p_le_i_weight: float = 0.0,
+):
+    """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
+
+    Differentiates the loss with respect to the whole model pytree; any
+    ``frozen_stokes`` sub-models have their update zeroed (held fixed) for the
+    hierarchical study mode. All keyword-only arguments are static under
+    ``eqx.filter_jit``.
+
+    Returns
+    -------
+    model, opt_state, loss, aux
+        The updated model and optimizer state, the scalar loss, and the
+        :func:`polarized_loss_fn` aux dict.
+    """
+
+    def loss_wrap(m):
+        return polarized_loss_fn(
+            m, xy, targets, sigmas, masks, A_batch, time_indices, frame_max, frame_min,
+            basis=basis, products=products, neg_weight=neg_weight,
+            w_sparse_weight=w_sparse_weight, b_sparse_weight=b_sparse_weight,
+            p_le_i_weight=p_le_i_weight,
+        )
+
+    (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
+    updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    if frozen_stokes:
+        updates = _zero_frozen_updates(updates, tuple(frozen_stokes))
+    model = eqx.apply_updates(model, updates)
+    return model, opt_state, loss, aux
 
 
 class PlateauScheduler:

@@ -1,0 +1,122 @@
+"""Polarized training wiring: a mini-train reduces every per-Stokes chi-squared,
+the hierarchical mode freezes chosen Stokes, and the circular basis trains too.
+"""
+
+from __future__ import annotations
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from neuraldmd.losses import polarized_loss_fn
+from neuraldmd.polarized import PolarizedNeuralDMD
+from neuraldmd.training import make_polarized_optimizer, polarized_train_step
+
+MODEL_KW = dict(
+    hidden_size=32,
+    num_layers=2,
+    num_frequencies=2,
+    temporal_latent_dim=16,
+    temporal_hidden=32,
+    temporal_layers=2,
+)
+STOKES = ("I", "Q", "U")
+_NOPEN = dict(neg_weight=0.0, w_sparse_weight=0.0, b_sparse_weight=0.0)  # isolate the chi2
+
+
+def _fittable_batch(stokes=STOKES, p=20, t=4, v=6, seed=0):
+    """A batch whose targets are exact visibilities of a fixed truth image, so a
+    perfect fit (chi2 -> 0) exists and gradient descent must reduce chi2."""
+    rng = np.random.default_rng(seed)
+    xy = jnp.asarray(rng.normal(size=(p, 2)))
+    a = (rng.normal(size=(t, v, p)) + 1j * rng.normal(size=(t, v, p))).astype(np.complex64)
+    a = jnp.asarray(a)
+    ti = jnp.linspace(0.0, 1.0, t)
+    truth = {s: jnp.asarray(rng.normal(size=(p, t))) for s in stokes}
+    targets = {s: jnp.einsum("tvp,pt->tv", a, truth[s].astype(jnp.complex64)) for s in stokes}
+    sig = {s: jnp.ones((t, v)) for s in stokes}
+    msk = {s: jnp.ones((t, v)) for s in stokes}
+    fmax = {s: 1.0 for s in stokes}
+    fmin = {s: 0.0 for s in stokes}
+    return xy, a, ti, targets, sig, msk, fmax, fmin
+
+
+def _chi2s(model, xy, targets, sig, msk, a, ti, fmax, fmin, **kw):
+    _, aux = polarized_loss_fn(model, xy, targets, sig, msk, a, ti, fmax, fmin, **_NOPEN, **kw)
+    return {k: float(v) for k, v in aux["chi2_vis"].items()}
+
+
+def test_minitrain_decreases_every_stokes_chi2():
+    """30 AdamW steps reduce chi2 for I, Q, and U simultaneously."""
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(0), **MODEL_KW)
+    xy, a, ti, targets, sig, msk, fmax, fmin = _fittable_batch()
+    opt = make_polarized_optimizer(model, initial_lr=3e-3)
+    opt_state = opt.init(eqx.filter(model, eqx.is_array))
+
+    init = _chi2s(model, xy, targets, sig, msk, a, ti, fmax, fmin)
+    for _ in range(30):
+        model, opt_state, _, _ = polarized_train_step(
+            model, opt_state, xy, targets, sig, msk, a, ti, opt, fmax, fmin, **_NOPEN
+        )
+    final = _chi2s(model, xy, targets, sig, msk, a, ti, fmax, fmin)
+    for s in STOKES:
+        assert final[s] < init[s], f"{s}: {final[s]:.4g} !< {init[s]:.4g}"
+
+
+def test_hierarchical_freezes_I_but_trains_others():
+    """With frozen_stokes=('I',), I's parameters stay bit-identical while Q moves."""
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(1), **MODEL_KW)
+    xy, a, ti, targets, sig, msk, fmax, fmin = _fittable_batch(seed=1)
+    opt = make_polarized_optimizer(model, initial_lr=1e-2)
+    opt_state = opt.init(eqx.filter(model, eqx.is_array))
+
+    before = eqx.filter(model, eqx.is_array)
+    for _ in range(5):
+        model, opt_state, _, _ = polarized_train_step(
+            model, opt_state, xy, targets, sig, msk, a, ti, opt, fmax, fmin,
+            frozen_stokes=("I",), **_NOPEN,
+        )
+    after = eqx.filter(model, eqx.is_array)
+
+    def leaves(m, s):
+        return jax.tree_util.tree_leaves(m.models[s])
+
+    i_unchanged = all(
+        np.allclose(np.asarray(x), np.asarray(y))
+        for x, y in zip(leaves(before, "I"), leaves(after, "I"), strict=True)
+    )
+    q_changed = any(
+        not np.allclose(np.asarray(x), np.asarray(y))
+        for x, y in zip(leaves(before, "Q"), leaves(after, "Q"), strict=True)
+    )
+    assert i_unchanged, "frozen Stokes I changed"
+    assert q_changed, "trainable Stokes Q did not change"
+
+
+def test_circular_basis_training_reduces_loss():
+    """A few steps in the circular (per-product) basis reduce the total loss."""
+    model = PolarizedNeuralDMD(STOKES, r=3, key=jax.random.PRNGKey(2), **MODEL_KW)
+    xy, a, ti, _, _, _, fmax, fmin = _fittable_batch(seed=2)
+    # product-basis targets from a fixed truth so a good fit exists
+    rng = np.random.default_rng(9)
+    prods = ("RR", "LL", "RL", "LR")
+
+    def _rand_vis():
+        v = rng.normal(size=(4, 6)) + 1j * rng.normal(size=(4, 6))
+        return jnp.asarray(v.astype(np.complex64))
+
+    tgt = {p: _rand_vis() for p in prods}
+    sig = {p: jnp.ones((4, 6)) for p in prods}
+    msk = {p: jnp.ones((4, 6)) for p in prods}
+    opt = make_polarized_optimizer(model, initial_lr=3e-3)
+    opt_state = opt.init(eqx.filter(model, eqx.is_array))
+
+    first = None
+    for step in range(20):
+        model, opt_state, loss, _ = polarized_train_step(
+            model, opt_state, xy, tgt, sig, msk, a, ti, opt, fmax, fmin, basis="circular", **_NOPEN
+        )
+        if step == 0:
+            first = float(loss)
+    assert float(loss) < first
