@@ -13,12 +13,24 @@ import numpy as np
 from jax.scipy.special import gammaln
 
 
-def make_xy_grid(H: int, W: int, fov_x: float, fov_y: float):
-    """Pixel-center coordinates (P, 2) in the same units the network uses."""
-    xs = jnp.linspace(-fov_x / 2, fov_x / 2, W)
-    ys = jnp.linspace(-fov_y / 2, fov_y / 2, H)
-    X, Y = jnp.meshgrid(xs, ys, indexing="xy")
-    return jnp.stack([X.ravel(), Y.ravel()], axis=1).astype(jnp.float32)
+def make_xy_grid(H: int, W: int, fov_x: float, fov_y: float, legacy_grid: bool = False):
+    """Pixel coordinates (P, 2), matching ``DMDDataLoader``'s pixel grid exactly.
+
+    The pretraining targets must live on the same grid the model is later
+    trained and evaluated on. The default uses the loader's convention
+    ``theta = (idx - N/2) * (fov / N)``; ``legacy_grid=True`` restores the old
+    ``linspace(-fov/2, fov/2, N)`` grid (offset by ~half a pixel).
+    """
+    if legacy_grid:
+        xs = jnp.linspace(-fov_x / 2, fov_x / 2, W)
+        ys = jnp.linspace(-fov_y / 2, fov_y / 2, H)
+        X, Y = jnp.meshgrid(xs, ys, indexing="xy")
+        return jnp.stack([X.ravel(), Y.ravel()], axis=1).astype(jnp.float32)
+
+    idx = jnp.arange(H * W)
+    theta_x = ((idx % W) - W / 2.0) * (fov_x / W)
+    theta_y = ((idx // W) - H / 2.0) * (fov_y / H)
+    return jnp.stack([theta_x, theta_y], axis=1).astype(jnp.float32)
 
 
 def _radial_R(n: int, mabs: int, rho):
