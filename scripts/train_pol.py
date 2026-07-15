@@ -38,6 +38,8 @@ def parse_args():
     ap.add_argument("--no-pretrain", action="store_true", help="Skip the Stokes-I pretrain")
     ap.add_argument("--pretrain-steps", type=int, default=2000)
     ap.add_argument("--pretrain-lr", type=float, default=1e-4)
+    ap.add_argument("--pretrain-radius", type=float, default=1.0,
+                    help="disk-template radius as a multiple of the gyration radius")
     # optimizer / LR schedule (exponential annealing when decay-rate < 1)
     ap.add_argument("--optimizer", default="adamw", choices=["adamw", "adam", "adamax"])
     ap.add_argument("--lr-decay-rate", type=float, default=1.0, help="<1 enables exp decay")
@@ -100,7 +102,8 @@ def main():
         print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
         model, _ = pretrain_stokes_i(
             model, truth_cubes["I"], num_steps=args.pretrain_steps,
-            lr=args.pretrain_lr, key=jax.random.PRNGKey(args.seed + 2),
+            lr=args.pretrain_lr, radius_scale=args.pretrain_radius,
+            key=jax.random.PRNGKey(args.seed + 2),
         )
 
     extra = {"products": op.stokes} if args.basis == "circular" else {}
@@ -116,7 +119,9 @@ def main():
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
-    ev.plot_polarized_summary(recon, truth_cubes, str(out / "pol_summary.png"))
+    ev.plot_polarized_summary(
+        recon, truth_cubes, str(out / "pol_summary.png"), fov_uas=args.fov_uas
+    )
 
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:
@@ -130,8 +135,8 @@ def main():
 
     # animated GIFs (reconstruction + truth) with EVPA ticks
     try:
-        ev.make_polarized_gif(recon, str(out / "recon_pol.gif"))
-        ev.make_polarized_gif(truth_cubes, str(out / "truth_pol.gif"))
+        ev.make_polarized_gif(recon, str(out / "recon_pol.gif"), fov_uas=args.fov_uas)
+        ev.make_polarized_gif(truth_cubes, str(out / "truth_pol.gif"), fov_uas=args.fov_uas)
     except Exception as exc:
         print(f"[warn] gif export failed: {exc}", flush=True)
 

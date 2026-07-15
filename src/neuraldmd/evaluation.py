@@ -303,49 +303,104 @@ def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     return float(np.degrees(np.median(np.abs(diff))))
 
 
-def plot_polarized_summary(recon, truth, path, frame=None):
+def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, skip=None):
+    """Overlay EVPA ticks on a Stokes-I background (EHT dynamics-plot convention).
+
+    Ticks point along ``(-sin chi, cos chi)`` with ``chi = 0.5*angle(Q + iU)``,
+    have length proportional to the polarized intensity, and are colored by the
+    fractional polarization; the intensity map uses ``afmhot`` with RA increasing
+    to the left. Ticks are masked where I or P is below 10% of its peak.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Target axes.
+    intensity, q, u : numpy.ndarray
+        ``(H, W)`` Stokes I, Q, U maps for a single frame.
+    fov_uas : float
+        Field of view [micro-arcsec] setting the tick geometry.
+    cmap_bg : str, optional
+        Background colormap for Stokes I. Default ``"afmhot"``.
+    vmax : float or None, optional
+        Upper limit of the intensity color scale (``None`` autoscales).
+    skip : int or None, optional
+        Draw one tick every ``skip`` pixels (default ``~W/20``).
+
+    Returns
+    -------
+    tuple of (matplotlib.quiver.Quiver, matplotlib.image.AxesImage)
+        The tick and background-image artists.
+    """
+    from matplotlib.colors import Normalize
+
+    intensity = np.asarray(intensity)
+    q, u = np.asarray(q), np.asarray(u)
+    _, nx = intensity.shape
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+    bg = ax.imshow(intensity, cmap=cmap_bg, origin="upper", vmin=0.0, vmax=vmax, extent=lims)
+
+    px = fov_uas / nx
+    yy, xx = np.mgrid[slice(-fov_uas / 2, fov_uas / 2, px), slice(-fov_uas / 2, fov_uas / 2, px)]
+    amp = np.sqrt(q**2 + u**2)
+    scal = float(amp.max() * 0.5) or 1.0
+    angle = np.angle(q + 1j * u)
+    vx = -np.sin(angle / 2) * amp / scal
+    vy = np.cos(angle / 2) * amp / scal
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mfrac = amp / np.abs(intensity)
+
+    imax = float(np.abs(intensity).max()) or 1.0
+    qumax = float(amp.max()) or 1.0
+    mask = (np.abs(intensity) < 0.1 * imax) | (amp < 0.1 * qumax)
+    vx = np.ma.masked_where(mask, vx)
+    vy = np.ma.masked_where(mask, vy)
+    mfrac = np.ma.masked_where(mask, mfrac)
+
+    if skip is None:
+        skip = max(1, nx // 20)
+    quiv = ax.quiver(
+        -xx[::skip, ::skip], -yy[::skip, ::skip],
+        vx[::skip, ::skip], vy[::skip, ::skip], mfrac[::skip, ::skip],
+        cmap="rainbow", norm=Normalize(vmin=0.0, vmax=0.5),
+        headlength=0, headwidth=1, pivot="mid", scale=16, width=0.01,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    return quiv, bg
+
+
+def plot_polarized_summary(recon, truth, path, frame=None, fov_uas=200.0):
     """Save a truth-vs-reconstruction figure: time-mean (or one frame) I/Q/U maps
-    plus a polarized-intensity image with EVPA sticks for each."""
-    from .physics.stokes import evpa, linear_polarized_intensity
+    plus a Stokes-I image overlaid with EVPA ticks (EHT dynamics-plot style)."""
 
     def pick(cube):
         cube = np.asarray(cube)
         return cube.mean(0) if frame is None else cube[frame]
 
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
     for col, s in enumerate(["I", "Q", "U"]):
-        cmap = "inferno" if s == "I" else "coolwarm"
+        cmap = "afmhot" if s == "I" else "coolwarm"
         for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
-            axes[row, col].imshow(pick(cube[s]), cmap=cmap, origin="lower")
+            axes[row, col].imshow(pick(cube[s]), cmap=cmap, origin="upper", extent=lims)
             axes[row, col].set_title(f"{label} {s}")
             axes[row, col].axis("off")
 
     for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
-        q_m, u_m = pick(cube["Q"]), pick(cube["U"])
-        p = linear_polarized_intensity(q_m, u_m)
-        chi = evpa(q_m, u_m)
         ax = axes[row, 3]
-        ax.imshow(p, cmap="inferno", origin="lower")
-        ax.set_title(f"{label} P + EVPA")
+        _evpa_quiver(ax, pick(cube["I"]), pick(cube["Q"]), pick(cube["U"]), fov_uas)
+        ax.set_title(f"{label} I + EVPA")
         ax.axis("off")
-        n = p.shape[0]
-        step = max(1, n // 16)
-        ys, xs = np.mgrid[0:n:step, 0:n:step]
-        sel = p[::step, ::step] > 0.2 * p.max()
-        ax.quiver(
-            xs[sel], ys[sel],
-            np.cos(chi[::step, ::step])[sel], np.sin(chi[::step, ::step])[sel],
-            color="cyan", pivot="mid", headwidth=0, headlength=0, scale=25,
-        )
 
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", pmin_frac=0.1):
-    """Animate a polarized reconstruction: per-frame Stokes I with EVPA
-    line-segment ticks colored by linear-polarization fraction.
+def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
+    """Animate a polarized reconstruction (EHT dynamics-plot style): per-frame
+    Stokes I with EVPA ticks colored by fractional polarization, length
+    proportional to polarized intensity.
 
     Parameters
     ----------
@@ -353,40 +408,27 @@ def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", pmin_frac=0.1):
         ``{"I": (T, H, W), "Q": ..., "U": ...}`` reconstruction (or truth).
     path : str
         Output GIF path.
-    fps : int
-        Frames per second.
-    cmap : str
-        Colormap for Stokes I.
-    pmin_frac : float
-        Only draw EVPA ticks where ``P > pmin_frac * P.max()``.
+    fps : int, optional
+        Frames per second. Default 10.
+    cmap : str, optional
+        Background colormap for Stokes I. Default ``"afmhot"``.
+    fov_uas : float, optional
+        Field of view [micro-arcsec] for the tick geometry. Default 200.
     """
-    from .physics.stokes import evpa, linear_polarized_intensity
-
     intensity = np.asarray(cubes["I"])
     q = np.asarray(cubes["Q"]) if "Q" in cubes else None
     u = np.asarray(cubes["U"]) if "U" in cubes else None
-    n_t, n, _ = intensity.shape
-    step = max(1, n // 20)
-    sub = (slice(None, None, step), slice(None, None, step))
+    n_t = intensity.shape[0]
     vmax = float(intensity.max()) or 1.0
 
     frames = []
     for t in range(n_t):
         fig, ax = plt.subplots(figsize=(4, 4), dpi=100)
-        ax.imshow(intensity[t], cmap=cmap, origin="lower", vmin=0.0, vmax=vmax)
         if q is not None and u is not None:
-            p = linear_polarized_intensity(q[t], u[t])
-            chi = evpa(q[t], u[t])
-            frac = p / (np.abs(intensity[t]) + 1e-8)  # fractional pol -> tick color
-            ys, xs = np.mgrid[0:n:step, 0:n:step]
-            sel = p[sub] > pmin_frac * (p.max() or 1.0)
-            # EVPA line segments (no arrowheads) colored by pol fraction
-            ax.quiver(
-                xs[sel], ys[sel],
-                np.cos(chi[sub])[sel], np.sin(chi[sub])[sel], frac[sub][sel],
-                cmap="viridis", pivot="mid", headwidth=0, headlength=0,
-                headaxislength=0, scale=22, width=0.006,
-            )
+            _evpa_quiver(ax, intensity[t], q[t], u[t], fov_uas, cmap_bg=cmap, vmax=vmax)
+        else:
+            lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+            ax.imshow(intensity[t], cmap=cmap, origin="upper", vmin=0.0, vmax=vmax, extent=lims)
         ax.axis("off")
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())

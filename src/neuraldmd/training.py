@@ -340,7 +340,7 @@ def train_polarized_model(
     ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
 
     history = {"total": [], "chi2": {k: [] for k in loader.keys}}
-    best_loss = jnp.inf
+    best_metric = float("inf")
     at_noise = 0
 
     with tqdm(total=num_epochs) as pbar:
@@ -368,8 +368,11 @@ def train_polarized_model(
                     flush=True,
                 )
 
-            if loss < best_loss:
-                best_loss = loss
+            # track the best on the worst-product chi2 so the saved model targets
+            # the gate (all chi2 -> 1), not an epoch where the polarized products
+            # merely overfit below the noise floor while I is still poor
+            if max_chi2 < best_metric:
+                best_metric = max_chi2
                 eqx.tree_serialise_leaves(ckpt_path, model)
 
             if early_stop_chi2 is not None:
@@ -383,7 +386,10 @@ def train_polarized_model(
                     )
                     break
 
-    print(f"Best checkpoint saved to {ckpt_path}")
+    # evaluate/return the BEST checkpoint, not the last: late-stage LR noise makes
+    # the final epoch a poor snapshot, and the driver evaluates the returned model
+    model = eqx.tree_deserialise_leaves(ckpt_path, model)
+    print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}")
     return model, history
 
 
