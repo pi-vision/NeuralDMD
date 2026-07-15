@@ -238,3 +238,109 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
         "chi2_amp": float(chi2_amp_num / masks.sum()),
         "chi2_cp": float(cp_num / cp_masks.sum()),
     }
+
+
+# ---------------------------------------------------------------------------
+# Polarized reconstruction metrics (Milestone M2)
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=np.pi, fov_y=np.pi):
+    """Reconstruct per-Stokes image cubes from a ``PolarizedNeuralDMD``.
+
+    Each sub-model is evaluated with its own physical scaling.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+    npix : int
+        Image grid side length.
+    times : array-like
+        ``(T,)`` normalized frame times.
+    frame_max, frame_min : dict of str -> float
+        Per-Stokes output scaling (same dicts used for training).
+    fov_x, fov_y : float
+        Network coordinate extents (must match the loader).
+
+    Returns
+    -------
+    dict of str -> numpy.ndarray
+        ``{stokes: (T, npix, npix)}`` reconstructed cubes.
+    """
+    xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
+    times = jnp.asarray(np.asarray(times, dtype=np.float32))
+    cubes = {}
+    for s in model.stokes:
+        intensities, _, _ = model.models[s].reconstruct(xy, times, frame_max[s], frame_min[s])
+        cubes[s] = np.asarray(intensities).T.reshape(len(times), npix, npix)
+    return cubes
+
+
+def polarized_nrmse(recon, truth):
+    """Per-Stokes normalized RMSE ``||recon - truth|| / ||truth||`` (Frobenius)."""
+    out = {}
+    for s in recon:
+        r, t = np.asarray(recon[s]), np.asarray(truth[s])
+        denom = np.linalg.norm(t)
+        out[s] = float(np.linalg.norm(r - t) / denom) if denom > 0 else float("nan")
+    return out
+
+
+def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
+    """Median EVPA error [degrees] where the truth polarized intensity is bright.
+
+    Compares ``0.5*atan2(U, Q)`` of the reconstruction and the truth over pixels
+    with ``P_truth > frac_thresh * P_truth.max()``, wrapping the angular
+    difference into ``(-90, 90]`` degrees before taking the median absolute value.
+    """
+    from .physics.stokes import evpa, linear_polarized_intensity
+
+    tq, tu = np.asarray(truth["Q"]), np.asarray(truth["U"])
+    rq, ru = np.asarray(recon["Q"]), np.asarray(recon["U"])
+    p = linear_polarized_intensity(tq, tu)
+    mask = p > frac_thresh * p.max()
+    if not mask.any():
+        return float("nan")
+    diff = evpa(rq, ru)[mask] - evpa(tq, tu)[mask]
+    diff = (diff + np.pi / 2) % np.pi - np.pi / 2  # wrap to (-pi/2, pi/2]
+    return float(np.degrees(np.median(np.abs(diff))))
+
+
+def plot_polarized_summary(recon, truth, path, frame=None):
+    """Save a truth-vs-reconstruction figure: time-mean (or one frame) I/Q/U maps
+    plus a polarized-intensity image with EVPA sticks for each."""
+    from .physics.stokes import evpa, linear_polarized_intensity
+
+    def pick(cube):
+        cube = np.asarray(cube)
+        return cube.mean(0) if frame is None else cube[frame]
+
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    for col, s in enumerate(["I", "Q", "U"]):
+        cmap = "inferno" if s == "I" else "coolwarm"
+        for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
+            axes[row, col].imshow(pick(cube[s]), cmap=cmap, origin="lower")
+            axes[row, col].set_title(f"{label} {s}")
+            axes[row, col].axis("off")
+
+    for row, (label, cube) in enumerate([("truth", truth), ("recon", recon)]):
+        q_m, u_m = pick(cube["Q"]), pick(cube["U"])
+        p = linear_polarized_intensity(q_m, u_m)
+        chi = evpa(q_m, u_m)
+        ax = axes[row, 3]
+        ax.imshow(p, cmap="inferno", origin="lower")
+        ax.set_title(f"{label} P + EVPA")
+        ax.axis("off")
+        n = p.shape[0]
+        step = max(1, n // 16)
+        ys, xs = np.mgrid[0:n:step, 0:n:step]
+        sel = p[::step, ::step] > 0.2 * p.max()
+        ax.quiver(
+            xs[sel], ys[sel],
+            np.cos(chi[::step, ::step])[sel], np.sin(chi[::step, ::step])[sel],
+            color="cyan", pivot="mid", headwidth=0, headlength=0, scale=25,
+        )
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)

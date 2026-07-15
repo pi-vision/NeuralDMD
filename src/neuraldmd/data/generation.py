@@ -642,6 +642,7 @@ def generate_polarized_dataset(
     basis: str = "stokes",
     ttype: str = "direct",
     seed: int = 42,
+    save_truth: bool = True,
     spot_kwargs: dict | None = None,
 ):
     """Generate a polarized synthetic dataset end-to-end and write a v2 obs_dir.
@@ -719,6 +720,19 @@ def generate_polarized_dataset(
         uvfits_path, npix=npix, fov_uas=fov_uas, stokes=tuple(stokes), basis=basis
     )
     op.to_obs_dir(out_dir)
+
+    if save_truth:
+        # ground-truth Stokes cubes (T, npix, npix) for reconstruction metrics,
+        # with normalized [0, 1] frame times matching the loader default.
+        np.savez(
+            out_dir / "truth_pol.npz",
+            I=intensity.astype(np.float32),
+            Q=q.astype(np.float32),
+            U=u.astype(np.float32),
+            times=np.linspace(0.0, 1.0, len(times)).astype(np.float32),
+            npix=npix,
+            fov_uas=fov_uas,
+        )
     return op
 
 

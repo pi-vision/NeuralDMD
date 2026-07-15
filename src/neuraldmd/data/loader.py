@@ -81,7 +81,11 @@ class PolarizedDMDDataLoader:
 
         self.num_frames = n_t
         self.pixel_coords = _pixel_grid(npix, fov_x, fov_y)
-        self.times = np.asarray(times, dtype=np.float32) if times is not None else None
+        if times is not None:
+            self.times = np.asarray(times, dtype=np.float32)
+        else:
+            # normalized frame times in [0, 1] (matches the model's t_scale usage)
+            self.times = np.linspace(0.0, 1.0, n_t, dtype=np.float32)
         self.batch_size = int(batch_size)
         self.epochs = int(epochs)
         self.shuffle = shuffle
@@ -124,10 +128,7 @@ class PolarizedDMDDataLoader:
             sel = arr[time_indices, ...]
             return sel.reshape(n_batches, self.batch_size, *sel.shape[1:])
 
-        if self.times is not None:
-            times = self.times[time_indices]
-        else:
-            times = time_indices.astype(np.float32)
+        times = self.times[time_indices]
         return (
             self.pixel_coords,
             batched(self.op.A),
