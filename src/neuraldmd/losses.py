@@ -248,8 +248,12 @@ def polarized_loss_fn(
 
     pol = [s for s in model.stokes if s in ("Q", "U", "V")]
     if p_le_i_weight and pol:
+        # eps inside the sqrt is REQUIRED: with pol tied to I (iscaled), Q,U vanish
+        # exactly where I crosses zero, so p_sq=0 there and an unguarded sqrt has an
+        # infinite derivative -- combined with relu'(<0)=0 it yields 0*inf = NaN,
+        # which blew up otherwise-healthy runs the instant a pixel reached I=0.
         p_sq = sum(images[s] ** 2 for s in pol)
-        p_penalty = jnp.sum(jax.nn.relu(jnp.sqrt(p_sq) - images["I"]) ** 2)
+        p_penalty = jnp.sum(jax.nn.relu(jnp.sqrt(p_sq + 1e-12) - images["I"]) ** 2)
     else:
         p_penalty = jnp.asarray(0.0)
 
