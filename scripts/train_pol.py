@@ -150,6 +150,27 @@ def parse_args():
         help="compactness prior weight: penalize I flux by squared radius (kills "
         "off-source haze the data cannot constrain)",
     )
+    ap.add_argument(
+        "--compact-pol-weight",
+        type=float,
+        default=0.0,
+        help="polarized compactness weight: penalize P=sqrt(Q^2+U^2) by squared "
+        "radius (kills off-ring pol haze from direct Q,U; radius-gated)",
+    )
+    ap.add_argument(
+        "--pol-support-weight",
+        type=float,
+        default=0.0,
+        help="polarized support weight: penalize P where I is faint, "
+        "mean(P*exp(-I/tau)) (confines pol to the bright ring incl. dark center; "
+        "I-gated, preferred over --compact-pol-weight for direct Q,U)",
+    )
+    ap.add_argument(
+        "--pol-support-tau",
+        type=float,
+        default=0.05,
+        help="support gate scale as a fraction of peak I (smaller = harder gate)",
+    )
     # evaluation: also report metrics after restoring both cubes to this beam
     ap.add_argument("--blur-uas", type=float, default=15.0, help="metric beam FWHM [uas]")
     ap.add_argument(
@@ -283,6 +304,9 @@ def main():
         flux_target=args.flux,
         flux_weight=args.flux_weight,
         compact_weight=args.compact_weight,
+        compact_pol_weight=args.compact_pol_weight,
+        pol_support_weight=args.pol_support_weight,
+        pol_support_tau=args.pol_support_tau,
         p_le_i_weight=args.p_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,

@@ -127,6 +127,9 @@ def polarized_loss_fn(
     flux_target: float | None = None,
     flux_weight: float = 1.0,
     compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
@@ -189,6 +192,22 @@ def polarized_loss_fn(
         Weight of the compactness prior -- the flux-weighted mean squared radius
         (source size) of Stokes I. Suppresses off-source haze that the short
         baselines cannot constrain. ``0`` disables (default).
+    compact_pol_weight : float
+        Weight of the same second-moment prior applied to the polarized intensity
+        ``P = sqrt(Q^2+U^2(+V^2))``. Suppresses the off-source *polarized* haze
+        that direct (untied) Q,U fields otherwise dump into the cross-hand null
+        space, forcing the pol onto the ring where its azimuthal (EVPA) structure
+        is actually constrained. ``0`` disables (default).
+    pol_support_weight : float
+        Weight of the polarized *support* prior ``mean(P * exp(-I / tau))``, which
+        penalizes polarized flux where Stokes I is faint. Confines pol to I's
+        bright support (both off-ring and the dark ring-center) -- the constraint
+        the fractional ``P = m_l * I`` parameterization enforces by construction,
+        supplied explicitly here for direct Q,U fields. ``0`` disables (default).
+    pol_support_tau : float
+        Gate scale as a fraction of PEAK I (I is normalized to its max), so it is
+        dataset-independent: pol is suppressed where ``I < ~tau * I_peak``. Smaller
+        ``tau`` = harder gate (default ``0.05``).
 
     Returns
     -------
@@ -242,19 +261,58 @@ def polarized_loss_fn(
     else:
         flux_penalty = jnp.asarray(0.0)
 
-    if compact_weight:
-        # compactness prior: the second moment of Stokes I about the field
-        # center (radially-weighted total flux). Off-source haze (large radius)
-        # lives in the short-baseline null space and is otherwise unconstrained;
-        # this penalizes peripheral flux *absolutely* -- unlike a flux-normalized
-        # source-size, which the model games by brightening the center instead of
-        # removing the haze. ``xy`` are the (network) pixel coordinates; ``r2`` is
-        # normalized to O(1) so the weight is roughly intensity-unit-independent.
+    if compact_weight or compact_pol_weight:
+        # compactness prior: the second moment about the field center (radially-
+        # weighted total flux). Off-source haze (large radius) lives in the
+        # short-baseline null space and is otherwise unconstrained; this penalizes
+        # peripheral flux *absolutely* -- unlike a flux-normalized source-size,
+        # which the model games by brightening the center instead of removing the
+        # haze. ``r2`` is normalized to O(1) so the weight is unit-independent.
         r2 = xy[:, 0] ** 2 + xy[:, 1] ** 2
         r2 = (r2 / (jnp.mean(r2) + 1e-12))[:, None]  # (P, 1), ~O(1)
+    if compact_weight:
         compact_penalty = jnp.mean(jnp.sum(jax.nn.relu(images["I"]) * r2, axis=0))
     else:
         compact_penalty = jnp.asarray(0.0)
+
+    if (compact_pol_weight or pol_support_weight) and pol:
+        p_mag = jnp.sqrt(sum(images[s] ** 2 for s in pol) + 1e-12)  # (P_pix, T)
+
+    if compact_pol_weight and pol:
+        # polarization compactness: the SAME second moment applied to the linear
+        # (+circular) polarized intensity P = sqrt(Q^2+U^2(+V^2)). With direct
+        # (untied) Q,U fields the cross-hand null space lets pol flux escape
+        # off-source as a haze while the ring is left under-polarized and
+        # structureless (m=0 EVPA); removing that off-ring escape forces the pol
+        # onto the ring, where RL/LR can only be satisfied by the true azimuthal
+        # (m>=2) EVPA structure. Uncheatable (absolute, not flux-normalized).
+        # NB radius-weighting alone still permits pol in the (faint) ring CENTER;
+        # ``pol_support_weight`` below gates on I-brightness instead, forbidding it.
+        compact_pol_penalty = jnp.mean(jnp.sum(p_mag * r2, axis=0))
+    else:
+        compact_pol_penalty = jnp.asarray(0.0)
+
+    if pol_support_weight and pol:
+        # polarization SUPPORT prior: penalize polarized flux P where Stokes I is
+        # faint, P * exp(-I / tau). Confines pol to I's bright support (the ring),
+        # suppressing both the off-ring haze AND pol leaking into the dark
+        # ring-center -- unlike a radial moment, which the model games by pooling
+        # pol at small radius. This is what the fractional (P = m_l * I)
+        # parameterization gets for free; direct Q,U need it explicitly. ``tau`` is
+        # a fraction of the PEAK brightness (I normalized to its max), so the gate
+        # is dataset-independent: pol is suppressed where I < ~tau * I_peak.
+        # I enters the gate ONLY as a passive reference (stop_gradient): otherwise
+        # exp(-I/tau) has d/dI < 0 and the model games the penalty by INFLATING I
+        # (brightening the source to switch off the gate) instead of shrinking P --
+        # which destroys the Stokes-I reconstruction. This penalty may only push P
+        # down, never push I up.
+        i_abs = jax.lax.stop_gradient(jnp.abs(images["I"]))
+        i_peak = jnp.max(i_abs) + 1e-12
+        gate = jnp.exp(-i_abs / (pol_support_tau * i_peak))
+        # sum over pixels, mean over frames -- consistent with the other priors
+        support_penalty = jnp.mean(jnp.sum(p_mag * gate, axis=0))
+    else:
+        support_penalty = jnp.asarray(0.0)
 
     total = (
         sum(chi2.values())
@@ -262,6 +320,8 @@ def polarized_loss_fn(
         + p_le_i_weight * p_penalty
         + flux_weight * flux_penalty
         + compact_weight * compact_penalty
+        + compact_pol_weight * compact_pol_penalty
+        + pol_support_weight * support_penalty
         + sparse_total
     )
     return total, {
@@ -270,5 +330,7 @@ def polarized_loss_fn(
         "p_penalty": p_penalty,
         "flux_penalty": flux_penalty,
         "compact_penalty": compact_penalty,
+        "compact_pol_penalty": compact_pol_penalty,
+        "support_penalty": support_penalty,
         "basis": basis,
     }

@@ -226,6 +226,9 @@ def polarized_train_step(
     flux_target: float | None = None,
     flux_weight: float = 1.0,
     compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
@@ -264,6 +267,9 @@ def polarized_train_step(
             flux_target=flux_target,
             flux_weight=flux_weight,
             compact_weight=compact_weight,
+            compact_pol_weight=compact_pol_weight,
+            pol_support_weight=pol_support_weight,
+            pol_support_tau=pol_support_tau,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
@@ -297,6 +303,9 @@ def polarized_train_epoch(
     flux_target: float | None = None,
     flux_weight: float = 1.0,
     compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
 ):
     """Scan :func:`polarized_train_step` over one epoch's batches.
 
@@ -342,6 +351,9 @@ def polarized_train_epoch(
             flux_target=flux_target,
             flux_weight=flux_weight,
             compact_weight=compact_weight,
+            compact_pol_weight=compact_pol_weight,
+            pol_support_weight=pol_support_weight,
+            pol_support_tau=pol_support_tau,
         )
         return (model, opt_state, key), (loss, aux["chi2_vis"], aux["grad_norm"])
 
@@ -436,6 +448,9 @@ def train_polarized_model(
     flux_target: float | None = None,
     flux_weight: float = 1.0,
     compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
     print_every: int = 50,
     early_stop_chi2: float | None = None,
     early_stop_epochs: int = 3,
@@ -530,6 +545,9 @@ def train_polarized_model(
                 flux_target=flux_target,
                 flux_weight=flux_weight,
                 compact_weight=compact_weight,
+                compact_pol_weight=compact_pol_weight,
+                pol_support_weight=pol_support_weight,
+                pol_support_tau=pol_support_tau,
             )
             # TRUE chi2 of the end-of-epoch model on the full data, no jitter --
             # the per-batch training chi2 is a mean over the evolving model and
