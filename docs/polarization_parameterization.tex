@@ -47,7 +47,9 @@ $b_j$.
 \end{equation}
 with $m_\ell=\texttt{scaling\_ml}\cdot\sigma(\text{raw}-\texttt{outshift})$ and the EVPA
 direction $(\cos2\xi,\sin2\xi)$ from its own networks. Polarization is tied to $I$ and
-starts unpolarized, growing only as the cross-hand data demand it.
+starts unpolarized, growing only as the cross-hand data demand it. This is one of five
+charts we implemented and ran; Section~\ref{sec:charts} gives all five and why this one
+ships.
 
 \paragraph{Likelihood.} Reduced $\chi^2$ on the native circular products
 ($RR=I+V$, $LL=I-V$, $RL=Q+iU$, $LR=Q-iU$), each
@@ -72,6 +74,121 @@ freedom, identical to \texttt{ehtim}'s \texttt{chisq\_vis}. We never divide by $
 12000 epochs, AdamW, lr $3\times10^{-4}$ decaying $0.5$ per $25000$ steps, hidden
 $256\times4$, \texttt{outshift} $2.0$, \texttt{theta\_max} $1.0$, npix $50$,
 FOV $200\,\mu$as, 64 frames, batch 8, seed 0.
+
+\section{The five polarization charts}
+\label{sec:charts}
+
+Every chart consumes the same raw sub-networks --- \texttt{intensity}, \texttt{frac},
+\texttt{cos2xi}, \texttt{sin2xi}, and optionally \texttt{circ} for $V$ --- each an
+independent NeuralDMD field of the form~\eqref{eq:dmd}. They differ \emph{only} in the
+algebraic map from those raws to $(Q,U,V)$. Fields a chart does not need are kept live as
+spares, so the freeze/warm-up partition and the sparsity mode list are identical across
+charts: changing \texttt{--pol-param} changes the algebra and nothing else. Below,
+$\sigma$ is the logistic sigmoid and $\epsilon$ a numerical floor.
+
+Two design axes organize the five, and they turn out to be the two that predict the
+results:
+
+\begin{description}
+  \item[Split.] Is the polarized \emph{magnitude} carried by its own scalar field --- with
+  its own DMD expansion, hence its own modes and its own $\Omega_j$ --- or is it
+  $|(q,u)|$, a nonlinear function of two other fields? Under a split, a moving polarized
+  blob is a moving blob \emph{in one field}. Without one, the same blob must be encoded as
+  correlated motion in two fields that are then combined nonlinearly.
+  \item[Winding.] Is the EVPA direction pinned to the unit circle $S^1$? If it is, its
+  winding number around the ring is a discrete topological invariant: changing it during
+  optimization forces the raw vector through the origin, where the normalized direction is
+  undefined and the gradient is singular. That is an \emph{optimization barrier}, not a
+  representational limit --- the pattern is expressible, but gradient descent must tunnel
+  to reach it.
+\end{description}
+
+\paragraph{1. \texttt{fractional} --- split, with winding. (Default; shipped.)}
+\begin{equation}
+  m_\ell = \texttt{scaling\_ml}\cdot\sigma(m_{\mathrm{raw}}-\texttt{outshift})
+  \in [0,\texttt{scaling\_ml}],
+  \qquad
+  (\cos2\xi,\,\sin2\xi) = \frac{(c_{\mathrm{raw}},\,s_{\mathrm{raw}})}
+       {\sqrt{c_{\mathrm{raw}}^{2}+s_{\mathrm{raw}}^{2}+\epsilon}},
+\end{equation}
+\begin{equation}
+  Q = m_\ell\,I\cos2\xi,\qquad U = m_\ell\,I\sin2\xi,\qquad
+  V = m_c\,I,\quad m_c = 2\big(\sigma(v_{\mathrm{raw}}-\texttt{outshift})-\tfrac12\big).
+\end{equation}
+\emph{What it does.} Separates magnitude ($m_\ell$, one field) from direction (a unit
+vector). Because the direction is normalized, $P_{\mathrm{lin}}=\sqrt{Q^2+U^2}=m_\ell|I|$
+\emph{exactly}, so $P_{\mathrm{lin}}\le\texttt{scaling\_ml}\cdot|I|\le I$ strictly, by
+construction and with no penalty. Support is automatic ($Q,U\propto I$). The
+$-\texttt{outshift}$ offset starts $m_\ell\approx0$, so the fit begins unpolarized and
+grows polarization only as the cross-hands demand it. \emph{Caveat:} the strict bound is
+on \emph{linear} polarization only --- $m_\ell$ and $m_c$ are bounded independently, so
+once $V$ is enabled $\sqrt{Q^2+U^2+V^2}=|I|\sqrt{m_\ell^2+m_c^2}$ can exceed $I$. \emph{The
+cost:} the unit normalization is exactly the winding barrier.
+
+\paragraph{2. \texttt{direct} --- no split, no constraints.}
+\begin{equation}
+  Q,\,U \;=\; \text{independent signed NeuralDMD fields, scaled to Stokes-$I$ units}.
+\end{equation}
+\emph{What it does.} Removes every structural constraint: no magnitude/direction
+decomposition at all, so no winding barrier and any EVPA pattern is as cheap as any other.
+\emph{Why not:} it also removes the two constraints worth having. Nothing enforces $P\le I$
+and nothing ties $Q,U$ to $I$'s support, so polarization can form off-source where no
+Stokes~$I$ exists. Both are demoted to a soft \texttt{p\_weight} penalty that must fight
+the likelihood rather than bound it.
+
+\paragraph{3. \texttt{iscaled} --- no split, support by construction.}
+\begin{equation}
+  q = \tanh q_{\mathrm{raw}},\quad u = \tanh u_{\mathrm{raw}},\qquad
+  Q = I\,q,\qquad U = I\,u,\qquad V = I\tanh v_{\mathrm{raw}}.
+\end{equation}
+\emph{What it does.} Ties polarization to $I$ multiplicatively, so $Q,U\to0$ wherever
+$I\to0$: the support constraint holds \emph{by construction} rather than through a penalty,
+and no off-source haze can form. $q,u$ stay free, so there is no winding barrier.
+\emph{Why not:} $P=I\sqrt{q^2+u^2}\le\sqrt2\,I$ --- the bound is $\sqrt2$, not $1$, so the
+residual $P\le I$ still needs the soft penalty.
+
+\paragraph{4. \texttt{expm} --- no split, exact $P\le I$.}
+Arras et al.\ (2025), the form \texttt{resolve} uses, applied on top of our own $I$ field:
+\begin{equation}
+  p = \sqrt{q^2+u^2+v^2+\epsilon},\qquad
+  (Q,U,V) = I\,\frac{\tanh p}{p}\,(q,u,v).
+\end{equation}
+\emph{What it does.} $m=\tanh p\le1$ gives \emph{exact} $P\le I$ (cleaner than
+\texttt{iscaled}'s $\sqrt2$), support $\propto I$, no winding ($q,u,v$ are free and
+$\tanh(p)/p$ is smooth through $p=0$), and native $V$. No $P\le I$ penalty required. On
+paper this dominates \texttt{iscaled} on every axis.
+
+\paragraph{5. \texttt{expm\_full} --- the full matrix exponential.}
+The complete coherency matrix, with $s$ the \emph{log} intensity:
+\begin{equation}
+  X = \exp\!\begin{pmatrix} s+v & q+iu \\ q-iu & s-v \end{pmatrix},
+  \qquad
+  I = e^{s}\cosh p, \qquad (Q,U,V) = e^{s}\,\frac{\sinh p}{p}\,(q,u,v).
+\end{equation}
+\emph{What it does.} $X=\exp(\text{Hermitian})$ is positive semi-definite \emph{by
+construction}: $I>0$ exactly (no negativity penalty needed) and
+$\det X = I^2-P^2\ge0$, i.e.\ $P\le I$ \emph{everywhere} --- not merely where a separately
+parameterized $I$ happens to stay positive. This is the physically complete matrix a
+correct polarized RIME (gains, D-terms, feed rotation) acts on, so it is the natural
+endpoint for calibration work. \emph{The catch:} $I$ is now log-parameterized. It is no
+longer the field the two Stokes-$I$ priors (Section~\ref{sec:dyn}) were tuned against, and
+it is incompatible with the physical-$I$ disk pretrain (\texttt{--no-pretrain}). $p$ and
+$s$ are clipped to keep $\cosh/\sinh$ inside float32.
+
+\paragraph{Where they sit.}
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+chart & split & winding barrier & support by construction & $P\le I$ \\
+\midrule
+\textbf{fractional} & \textbf{yes} & \textbf{yes} & yes & exact (linear only) \\
+\texttt{direct}     & no  & no  & \textbf{no} & penalty only \\
+\texttt{iscaled}    & no  & no  & yes & $\sqrt2$ bound + penalty \\
+\texttt{expm}       & no  & no  & yes & exact \\
+\texttt{expm\_full} & no  & no  & yes & exact, and $I>0$ (PSD) \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{Results: four models, one configuration}
 \label{sec:results}
@@ -123,6 +240,59 @@ dynamics overshoot the truth: on-ring variability $0.545$ against $0.355$).
 \textbf{Fractional is the only chart that never breaks}, so it is the one to ship when
 a single pipeline must cover everything. If only the three easier models matter,
 \texttt{expm} is the better choice --- this is a genuine trade, not a ranking.
+
+\paragraph{The two axes sort the grid.} The ranking is not arbitrary: \emph{split} and
+\emph{winding} (Section~\ref{sec:charts}) each predict exactly where they should matter,
+and each does.
+\begin{itemize}
+  \item \textbf{Winding costs fractional precisely where winding is required.} On
+  \texttt{varbeta2} --- whose EVPA turns through $1620^\circ$, the one model that
+  \emph{demands} a large winding number --- every barrier-free chart beats fractional
+  ($1.0^\circ$, $1.0^\circ$, $1.3^\circ$, $2.7^\circ$ versus $1.9^\circ$), and the two
+  exact-$P\!\le\!I$ ones reach $1.0^\circ$. The barrier is real and it is measurable. It
+  is also \emph{small}: fractional still recovers this model at $\beta_2=1.002$ and phase
+  correlation $+1.000$, so the barrier is tunnelled, not fatal.
+  \item \textbf{The split pays precisely where magnitude dynamics are required.} On
+  \texttt{hs-pol} --- a compact polarized blob that \emph{moves}, i.e.\ dynamics in the
+  polarized \emph{magnitude} --- fractional is best at $9.6^\circ$ and \emph{all four}
+  unsplit charts land at $13.5$--$19.0^\circ$. Under a split the moving blob is a moving
+  blob in the single field $m_\ell$, which owns its own DMD modes and $\Omega_j$; without
+  one, the same blob must appear as correlated motion in $q$ and $u$ that only becomes
+  localized after the nonlinear combination $|(q,u)|$.
+\end{itemize}
+The winding claim rests on four independent charts agreeing, and is solid. The split claim
+rests on a single chart carrying \texttt{split}${=}$\texttt{yes}, so it is a
+\textbf{hypothesis consistent with all five results}, not an established mechanism ---
+$n{=}1$ on the axis that matters most. It is, however, a \emph{falsifiable} one, which
+leads to the obvious next experiment.
+
+\paragraph{The untested cell, and a prediction.} The two axes span four combinations and
+our five charts occupy only two of them: \texttt{fractional} is (split, barrier) and the
+other four are all (no split, no barrier). \textbf{Nothing we ran is (split, no barrier)}
+--- and that cell should, on the argument above, beat everything in the table.
+
+It is not hypothetical. \textsc{Kine} (Levis et al.), the reference implementation for
+this class of problem, uses exactly it: a dedicated $m_\ell$ field, as in fractional, but
+with the direction components bounded \emph{independently} rather than normalized,
+\begin{equation}
+  m_\ell = \texttt{scaling\_ml}\cdot\sigma(m_{\mathrm{raw}}-\texttt{outshift}),
+  \qquad
+  \tilde{s},\,\tilde{c} = 2\big(\sigma(\cdot)-\tfrac12\big) \in [-1,1]
+  \ \ \text{(independent, \emph{not} unit-normalized)},
+\end{equation}
+\begin{equation}
+  Q = -\,I\,m_\ell\,\tilde{s}, \qquad U = I\,m_\ell\,\tilde{c}.
+\end{equation}
+Dropping the normalization removes the barrier while keeping the split; the price is that
+$P = I\,m_\ell\sqrt{\tilde{s}^2+\tilde{c}^2} \le \sqrt2\,\texttt{scaling\_ml}\,I$, so
+$P\le I$ is no longer exact --- though at \textsc{Kine}'s $\texttt{scaling\_ml}=0.75$ the
+bound is $\sqrt2\cdot0.75 = 1.06\,I$, i.e.\ tight to $6\%$ and arguably deliberate. That
+we converged on \textsc{Kine}'s chart up to this one detail is independent corroboration;
+that the detail we added is the one costing us \texttt{varbeta2} is the actionable part.
+\textbf{Prediction: fractional without the unit normalization should match the
+barrier-free charts on \texttt{varbeta2} while keeping fractional's \texttt{hs-pol}, and
+so pass 4/4 with the best worst-case in the table.} If it does not, the split hypothesis
+above is wrong and should be discarded.
 
 \section{The two priors, and their scales}
 \label{sec:dyn}
