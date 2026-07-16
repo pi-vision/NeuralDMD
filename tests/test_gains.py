@@ -48,12 +48,17 @@ def test_init_gains_are_identity():
 
 
 def test_amplitude_bounds_and_gradient():
-    """Amplitudes stay strictly inside amp_bounds even for extreme raw values,
-    and the gradient with respect to the raw parameter never vanishes."""
+    """Amplitudes stay inside amp_bounds even for extreme raw values, and the
+    gradient with respect to the raw parameter never vanishes."""
     g = StationGains(3, 2, amp_bounds=(0.9, 1.1))
     g = _set(g, amp_raw=jnp.array([[[25.0], [-25.0]], [[0.0], [0.0]], [[1.0], [-1.0]]]))
     amp = np.asarray(g.amplitudes())
-    assert amp.max() <= 1.1 and amp.min() >= 0.9
+    # sigmoid saturates to exactly 0.0/1.0 in float32 once |raw| >~ 20, so the bound is
+    # reached rather than approached: amp.max() is float32(1.1), which sits 2.4e-8 above
+    # float64 1.1. Compare in the model's own dtype -- widening to float64 (numpy<2
+    # promotion) reports that representation error as a bound violation.
+    lo, hi = np.float32(0.9), np.float32(1.1)
+    assert amp.max() <= hi and amp.min() >= lo
 
     def amp_of(raw):
         gg = _set(g, amp_raw=jnp.full((3, 2, 1), raw))
