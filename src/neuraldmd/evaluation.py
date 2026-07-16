@@ -382,6 +382,57 @@ def beta2_coefficient(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
     return complex(((q + 1j * u)[ann] * np.exp(2j * phi[ann])).sum() / den)
 
 
+def polarized_dynamics_nrmse(recon, truth):
+    """NRMSE of the TIME-VARYING part of Q and U (each cube minus its own time mean).
+
+    Global ``beta2`` cannot see polarization that is localized rather than spread
+    around the ring. In ``mring+hs-pol`` the polarized signal rides on a compact
+    orbiting spot while a static radial-EVPA ring dominates the annulus integral, so
+    the truth's global beta2 phase swings only ~1 deg and both ``beta2_amp_ratio``
+    and ``phase_corr`` are measuring the static ring, not the thing under test.
+
+    Removing each cube's time mean cancels the static polarization and leaves exactly
+    the moving part, which is what a dynamic-pol model is claiming to recover. It is
+    also meaningful for a static-pol truth: there the truth's dynamic Q,U is ~0, so a
+    large value flags polarization variability the reconstruction INVENTED.
+
+    Parameters
+    ----------
+    recon, truth : dict of str -> array_like
+        ``{"I","Q","U"}`` cubes, each ``(T, H, W)``.
+
+    Returns
+    -------
+    dict
+        ``nrmse_Q_dyn``/``nrmse_U_dyn`` -- ||recon_dyn - truth_dyn|| / ||truth_dyn||
+        (nan when the truth carries no dynamic pol at all); ``truth_dyn_power_Q``/
+        ``truth_dyn_power_U`` -- the truth's dynamic norm, so a vacuous test is
+        visible; ``recon_dyn_power_Q``/``recon_dyn_power_U`` -- the recon's, which
+        exposes invented dynamics against a static truth.
+    """
+    out = {}
+    for s_ in ("Q", "U"):
+        r, t = np.asarray(recon[s_]), np.asarray(truth[s_])
+        n = min(len(r), len(t))
+        r, t = r[:n], t[:n]
+        r_dyn, t_dyn = r - r.mean(0), t - t.mean(0)
+        tp, rp = float(np.linalg.norm(t_dyn)), float(np.linalg.norm(r_dyn))
+        # Guard RELATIVE to the truth's total power, not by an absolute floor: a
+        # static-pol truth still carries ~1e-7 of numerical dynamic power, and
+        # dividing by that gives a meaningless ~3e5. Where the truth has no dynamic
+        # polarization the ratio is undefined -- report nan and let
+        # recon_dyn_power speak instead (that is what exposes INVENTED variability).
+        scale = float(np.linalg.norm(t))
+        out[f"nrmse_{s_}_dyn"] = (
+            float(np.linalg.norm(r_dyn - t_dyn) / tp)
+            if tp > 1e-3 * max(scale, 1e-12)
+            else float("nan")
+        )
+        out[f"truth_dyn_power_{s_}"] = tp
+        out[f"recon_dyn_power_{s_}"] = rp
+    return out
+
+
 def beta2_series(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
     """Per-frame complex ``beta2``, i.e. ``beta2(t)`` -- the time-resolved swirl.
 

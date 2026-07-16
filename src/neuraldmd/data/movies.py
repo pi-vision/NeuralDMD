@@ -333,6 +333,130 @@ def make_mring_hs_pol_movie(
     return eh.movie.merge_im_list(frames, interp="linear", bounds_error=True)
 
 
+def make_mring_hs_polarized_movie(
+    npix=50,
+    fov_uas=200.0,
+    num_frames=64,
+    tstart_hr=9.0,
+    tstop_hr=15.0,
+    period_min=80.0,
+    direction="CW",
+    total_flux=2.7,
+    hs_flux=0.3,
+    pa_deg=120.0,
+    diameter_uas=52.0,
+    alpha_uas=15.0,
+    beta1_abs=0.23,
+    ring_radius_uas=26.0,
+    hs_fwhm_uas=20.0,
+    crescent_linpol=0.05,
+    crescent_circpol=0.001,
+    hs_linpol=0.2,
+    hs_circpol=0.002,
+    phase0_deg=0.0,
+    source="SgrA",
+    **sky,
+):
+    """m-ring + a **polarized** orbiting hot spot: the ``mring+hs-pol`` test model.
+
+    Ported from the ehteval model of the same name. Unlike ``mring+hsCW`` (a static
+    spiral EVPA with an *unpolarized* spot), here the ring carries a weak radial EVPA
+    (5%) and the hot spot carries its own stronger polarization (20%) whose EVPA
+    rotates with the orbital angle. The polarized structure therefore **moves with the
+    spot**: this is the only model in the suite with both Stokes-I dynamics AND
+    polarization dynamics, which makes it the strictest of the four.
+
+    Score with :func:`neuraldmd.evaluation.beta2_dynamics_error` -- the polarization
+    is time-varying, so the time-averaged ``beta2`` is not the right measure.
+
+    Parameters
+    ----------
+    npix, fov_uas, num_frames, tstart_hr, tstop_hr
+        Image grid, field of view [uas], and observation sampling.
+    period_min : float
+        Hot-spot orbital period [minutes].
+    direction : {"CW", "CCW"}
+        Orbital sense.
+    total_flux, hs_flux : float
+        Total and hot-spot flux [Jy]; the ring carries the remainder.
+    pa_deg, diameter_uas, alpha_uas, beta1_abs
+        Thick m-ring geometry.
+    ring_radius_uas, hs_fwhm_uas : float
+        Hot-spot orbital radius and FWHM [uas].
+    crescent_linpol, crescent_circpol : float
+        Ring linear / circular polarization fractions (weak).
+    hs_linpol, hs_circpol : float
+        Hot-spot linear / circular polarization fractions (strong, EVPA follows the orbit).
+    phase0_deg : float
+        Initial orbital phase [deg].
+    source : str
+        Source name for the ehtim model.
+    **sky
+        Overrides for the default sky coordinates (see ``SGRA``).
+
+    Returns
+    -------
+    ehtim.movie.Movie
+        The polarized movie (each frame carries I, Q, U, V).
+    """
+    import ehtim as eh
+
+    sky = {**SGRA, **sky}
+    fov = fov_uas * eh.RADPERUAS
+    times = np.linspace(tstart_hr, tstop_hr, num_frames)
+    mring_flux = total_flux - hs_flux
+    n_loops = (tstop_hr - tstart_hr) / (period_min / 60.0)
+    sign = 1.0 if str(direction).upper() == "CW" else -1.0
+    angles = np.deg2rad(phase0_deg) + np.linspace(0.0, sign, num_frames) * 2 * np.pi * n_loops
+    r = ring_radius_uas * eh.RADPERUAS
+    fwhm = hs_fwhm_uas * eh.RADPERUAS
+
+    # Q = I*m*cos(2 chi), U = I*m*sin(2 chi) (ehtim's qimage/uimage, which were
+    # removed in ehtim 1.4; inlined here so the model does not depend on that API)
+    lin = np.linspace(-1.0, 1.0, npix)
+    gx, gy = np.meshgrid(lin, lin)
+    grid_angle = np.angle(gx + 1j * gy).flatten()
+
+    frames = []
+    for angle, t in zip(angles, times, strict=False):
+        model = eh.model.Model(ra=sky["ra"], dec=sky["dec"], rf=sky["rf"], source=source)
+        im = model.add_thick_mring(
+            F0=mring_flux,
+            d=diameter_uas * eh.RADPERUAS,
+            alpha=alpha_uas * eh.RADPERUAS,
+            x0=0.0,
+            y0=0.0,
+            beta_list=[beta1_abs * np.exp(-1j * np.deg2rad(-pa_deg))],
+        ).make_image(fov, npix)
+        im.mjd = sky["mjd"]
+
+        # weak radial EVPA on the ring
+        ivec = np.asarray(im.imvec)
+        im.qvec = ivec * crescent_linpol * np.cos(2 * (grid_angle + np.pi / 2))
+        im.uvec = ivec * crescent_linpol * np.sin(2 * grid_angle)
+        im.vvec = crescent_circpol * ivec
+
+        # the hot spot, built separately so its EVPA can follow the orbit
+        gauss = eh.image.make_empty(
+            npix=npix, fov=fov, ra=sky["ra"], dec=sky["dec"], rf=sky["rf"], source=source
+        )
+        gauss = gauss.add_gauss(hs_flux, [fwhm, fwhm, 0.0, 0.0, 0.0], pol=None)
+        gvec = np.asarray(gauss.imvec)
+        gauss.qvec = gvec * hs_linpol * np.cos(2 * (-angle))
+        gauss.uvec = gvec * hs_linpol * np.sin(2 * (-angle))
+        gauss.vvec = hs_circpol * gvec
+        gauss = gauss.shift_fft([r * np.cos(angle), r * np.sin(angle)])
+
+        im.imvec = np.asarray(im.imvec) + np.asarray(gauss.imvec)
+        im.qvec = np.asarray(im.qvec) + np.asarray(gauss.qvec)
+        im.uvec = np.asarray(im.uvec) + np.asarray(gauss.uvec)
+        im.vvec = np.asarray(im.vvec) + np.asarray(gauss.vvec)
+        im.time = float(t)
+        frames.append(im)
+
+    return eh.movie.merge_im_list(frames, interp="linear", bounds_error=True)
+
+
 def make_varbeta2_movie(
     npix=50,
     fov_uas=200.0,

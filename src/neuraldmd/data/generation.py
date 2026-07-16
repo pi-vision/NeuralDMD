@@ -694,7 +694,20 @@ def generate_polarized_dataset(
     array_dir = Path(array_dir) if array_dir is not None else Path(__file__).parent / "arrays"
     array = eh.array.load_txt(str(array_dir / f"{array_name}.txt"))
 
-    if truth_model == "varbeta2":
+    if truth_model == "mring_hs_pol":
+        # m-ring + a POLARIZED orbiting hot spot: the polarized structure moves with
+        # the spot, so both I and pol are dynamic. The strictest model in the suite.
+        from .movies import make_mring_hs_polarized_movie
+
+        movie = make_mring_hs_polarized_movie(
+            npix=npix,
+            fov_uas=fov_uas,
+            num_frames=num_frames,
+            tstart_hr=tstart_hr,
+            tstop_hr=tstop_hr,
+            **mring_kwargs,
+        )
+    elif truth_model == "varbeta2":
         # rotating-EVPA ring: Stokes I static, beta2's PHASE turns 2*pi every
         # 2*varbeta_period_hr. Tests polarization DYNAMICS, which mring_hs (a
         # static spiral) cannot. Score with evaluation.beta2_dynamics_error --
