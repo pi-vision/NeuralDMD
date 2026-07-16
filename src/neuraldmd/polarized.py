@@ -100,17 +100,25 @@ class PolarizedNeuralDMD(eqx.Module):
             Complex DMD modes for the polarization fields (``m_l``, EVPA, ``m_c``).
             Defaults to ``r``. Set ``r_pol < r`` to deliberately starve the
             polarization's *temporal* capacity relative to I.
-        pol_param : {"fractional", "direct"}
-            Polarization parameterization. ``"fractional"`` (default) derives
-            ``Q,U`` from ``(m_l, EVPA)`` fields (``P <= I`` by construction, but
-            the *unit-normalized* EVPA direction must wind ``2 * (azimuthal mode)``
-            times around the source -- a topological constraint that makes an
-            m>=2 EVPA spiral very hard to optimize, collapsing to m=1). ``"direct"``
-            makes ``Q`` and ``U`` independent signed :class:`NeuralDMD` fields in
-            Stokes-I units (plan D8): no winding constraint, so an m=2 pattern is
-            as easy to fit as the ring itself. ``P <= I`` and off-source pol
-            suppression then come from the loss's soft ``p_weight`` penalty
-            (``sum relu(sqrt(Q^2+U^2+V^2) - I)^2``), NOT by construction.
+        pol_param : {"fractional", "direct", "iscaled"}
+            Polarization parameterization.
+            ``"fractional"`` (default) derives ``Q,U`` from ``(m_l, EVPA)`` fields
+            (``P <= I`` by construction, but the *unit-normalized* EVPA direction
+            must wind ``2 * (azimuthal mode)`` times around the source -- a
+            topological constraint that makes an m>=2 EVPA spiral very hard to
+            optimize, collapsing to m=1).
+            ``"direct"`` makes ``Q,U`` independent signed :class:`NeuralDMD` fields
+            in Stokes-I units (plan D8): no winding, but -- being untied from I --
+            they leak an off-source polarized haze into the cross-hand null space
+            that a soft ``p_weight``/support penalty must fight (an optimization
+            barrier the penalty does not reliably clear).
+            ``"iscaled"`` (recommended) makes ``Q = I*tanh(q)``, ``U = I*tanh(u)``
+            with ``q,u`` free signed fields: ties pol to I so NO off-source haze
+            can form (support by construction) AND keeps ``q,u`` free of the
+            winding obstruction (m>=2 representable). ``P <= I`` reduces to
+            ``sqrt(q^2+u^2) <= 1``, supplied softly by ``p_weight``. This is the
+            structural fix for both failure modes; see
+            ``docs/polarization_parameterization.tex``.
         pol_model_kwargs : dict or None
             Overrides applied on top of ``model_kwargs`` for the polarization
             fields only (e.g. ``{"hidden_size": 128, "num_layers": 2,
@@ -126,8 +134,10 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
-        if pol_param not in ("fractional", "direct"):
-            raise ValueError(f"pol_param must be 'fractional' or 'direct', got {pol_param!r}")
+        if pol_param not in ("fractional", "direct", "iscaled"):
+            raise ValueError(
+                f"pol_param must be 'fractional', 'direct', or 'iscaled', got {pol_param!r}"
+            )
         self.pol_param = str(pol_param)
         r_pol = r if r_pol is None else int(r_pol)
         pol_kwargs = {**model_kwargs, **(pol_model_kwargs or {})}
@@ -184,6 +194,31 @@ class PolarizedNeuralDMD(eqx.Module):
             if self.circ is not None:
                 v_img, v_modes = physical_intensities(self.circ, xy, times, frame_max["I"], 0.0)
                 images["V"] = v_img
+                modes.append(v_modes)
+            return images, modes
+
+        if self.pol_param == "iscaled":
+            # I-scaled direct: Q = I*q, U = I*u with q,u free tanh-bounded signed
+            # fields. Ties pol to I so Q,U -> 0 where I -> 0 -- NO off-source haze
+            # can form (the support constraint holds by construction, not via a
+            # penalty that must fight an optimization barrier) -- while keeping
+            # q,u free of the unit-EVPA winding obstruction, so an m>=2 (spiral)
+            # EVPA is representable. P = I*sqrt(q^2+u^2); tanh caps |q|,|u|<=1 so
+            # P <= sqrt(2)*I, and the residual P<=I is the soft p_le_i penalty.
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
+            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            q = jnp.tanh(q_raw)
+            u = jnp.tanh(u_raw)
+            images = {"I": i_img}
+            modes = [i_modes, q_modes, u_modes, s_modes]
+            if "Q" in self.stokes:
+                images["Q"] = i_img * q
+            if "U" in self.stokes:
+                images["U"] = i_img * u
+            if self.circ is not None:
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                images["V"] = i_img * jnp.tanh(v_raw)
                 modes.append(v_modes)
             return images, modes
 

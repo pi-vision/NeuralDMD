@@ -76,10 +76,11 @@ def parse_args():
     ap.add_argument(
         "--pol-param",
         default="fractional",
-        choices=["fractional", "direct"],
-        help="pol parameterization: 'fractional' (m_l,EVPA; P<=I by construction, "
-        "but EVPA winding makes m>=2 spirals hard) or 'direct' (independent signed "
-        "Q,U fields; m=2 fits like the ring; needs --p-weight for P<=I)",
+        choices=["fractional", "direct", "iscaled"],
+        help="pol parameterization: 'fractional' (m_l,EVPA; P<=I free but EVPA "
+        "winding makes m>=2 hard), 'direct' (free signed Q,U; m=2 easy but leaks "
+        "off-source haze), or 'iscaled' (Q=I*tanh(q),U=I*tanh(u); no haze AND no "
+        "winding -- recommended; P<=I via --p-weight)",
     )
     ap.add_argument(
         "--p-weight",
