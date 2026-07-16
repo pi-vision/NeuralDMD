@@ -1,10 +1,10 @@
 \documentclass[11pt]{article}
 \usepackage{amsmath,amssymb}
 \usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
 \usepackage{hyperref}
 
-\title{Polarization parameterization for NeuralDMD:\\
-why we fit $(I,\,m_\ell,\,\xi)$ rather than free $(I,\,Q,\,U)$}
+\title{Polarized imaging in NeuralDMD:\\ the method that works, and the bug that hid it}
 \author{Sgr\,A$^\ast$ dynamics / NeuralDMD polarization effort}
 \date{\today}
 
@@ -12,114 +12,234 @@ why we fit $(I,\,m_\ell,\,\xi)$ rather than free $(I,\,Q,\,U)$}
 \maketitle
 
 \begin{abstract}
-We record the reasoning behind modeling linear polarization in NeuralDMD as a
-\emph{fraction of Stokes~$I$} rather than as three free Stokes fields. The two
-representations describe the identical degrees of freedom; the fractional chart is
-simply the one in which the physical constraint $P\le I$ becomes a box bound (a
-single sigmoid) and in which polarization is structurally tied to the total
-intensity. This fixes an empirical failure we observed with free $(Q,U)$: the
-fit reached $\chi^2\!\approx\!1$ on the visibilities while producing unphysical
-polarization images.
+\noindent
+NeuralDMD now recovers the $m\!=\!2$ EVPA swirl of a polarized thick ring:
+$\mathrm{EVPA}=1.8^\circ$, $\beta_2$ amplitude $0.94$ at phase $-0.0^\circ$, with
+$\chi^2$ at the data's own noise floor---using the \emph{plain fractional}
+parameterization and \emph{no polarization prior at all}. Adding a Stokes-$I$
+compactness prior additionally recovers the orbiting hot spot
+($\mathrm{NRMSE}_I=0.17$, $75\%$ of the true on-ring variability).
+This note supersedes an earlier version, which concluded that fractional
+polarization was structurally incapable of representing $m\!=\!2$ and adopted an
+$I$-scaled chart instead. That conclusion was wrong. It rested on an ``off-source
+polarized haze'' that was not a property of the model or the data but an artifact
+of the \emph{image export path}. Section~\ref{sec:bug} documents the bug, because
+everything else in the effort was downstream of it.
 \end{abstract}
 
-\section{The problem}
-Polarimetric VLBI inversion from sparse coverage is severely ill-posed:
-many images reproduce the handful of measured cross-hand visibilities equally
-well. If Stokes $Q$ and $U$ are modeled as \emph{free, independent} image fields,
-the reconstruction is free to place polarized flux anywhere the data permit,
-including in physically forbidden configurations. In a controlled synthetic test
-(simultaneous $I,Q,U$; circular-basis $\chi^2$) a free-$(Q,U)$ model reached
-$\chi^2_{RR,LL,RL,LR}\!\approx\!1$ yet gave normalized image errors
-$\mathrm{NRMSE}_{Q,U}>1$ (worse than a null map) and an electric-vector position
-angle (EVPA) error of $\sim\!30^\circ$. The visibilities were fit; the images were
-not physical.
+\section{The bug: a phantom haze in the exported images}
+\label{sec:bug}
 
-\section{Physical constraints on the Stokes vector}
-At every pixel and time the Stokes vector $(I,Q,U,V)$ of physical radiation obeys
-two hard constraints:
-\begin{align}
-  P \;\equiv\; \sqrt{Q^2+U^2+V^2} \;&\le\; I, \label{eq:ple}\\
-  I=0 \;&\Rightarrow\; Q=U=V=0. \label{eq:support}
-\end{align}
-Equation~\eqref{eq:ple} states that the polarized intensity cannot exceed the
-total intensity (the fractional polarization $m=P/I\in[0,1]$; a source cannot be
-more than $100\%$ polarized). Equation~\eqref{eq:support}, a corollary, forbids
-polarized flux where there is no total flux. A free-$(Q,U)$ model can violate
-both.
+Training evaluates the sky model inside a JIT-compiled region
+(\texttt{eqx.filter\_jit}). The evaluation path---\texttt{reconstruct\_polarized\_cubes},
+which produces the cubes that every metric and every figure reads---called the same
+function \emph{eagerly}. The two do not agree. Measured on one fixed model, same
+inputs, same GPU:
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\texttt{stokes\_fields} evaluation & flux/frame [Jy] & $\chi^2_{RR}$ \\
+\midrule
+eager (the export path)          & 9.9536 & 137.743 \\
+jitted (what training optimizes) & 2.6255 & \phantom{0}9.565 \\
+\midrule
+truth                            & 2.7    & \phantom{00}0.4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The eager path adds a near-uniform positive offset of ${\sim}3\times10^{-3}$ per
+pixel---about $7.3$~Jy of spurious diffuse flux per frame on a $50\times50$ grid.
+It is invisible per pixel and enormous in the integral. It is not a precision
+effect: forcing \texttt{Precision.HIGHEST} and
+\texttt{default\_matmul\_precision("highest")} changes nothing, and the complex
+einsum and the $\chi^2$ reduction are bit-identical eager vs.\ jitted.
 
-\section{Two coordinate charts for the same degrees of freedom}
-A physical (linear) polarization state has three real degrees of freedom per
-pixel. These can be coordinatized as $(I,Q,U)$ \emph{or} as $(I,m_\ell,\xi)$,
-where $m_\ell$ is the linear polarization fraction and $\xi$ the EVPA:
+\paragraph{Consequence.} Every exported cube, and therefore every NRMSE, EVPA and
+$\beta_2$ ever recorded in this effort, described an image carrying $7.3$~Jy of
+phantom haze, while the model being trained was clean. \textbf{That offset is the
+``off-source polarized haze.''} The support prior, the radial polarized compactness
+prior, the $I$-scaled and matrix-exponential charts, and an $L_1$ prior on polarized
+flux were all designed to suppress it. They were fighting a rendering artifact. So
+was the ``winding obstruction'' argument: fractional polarization recovers the swirl
+to $1.8^\circ$.
+
+\paragraph{Fix.} Evaluate under JIT in the export path, exactly as training does.
+Two guards now make this class of error impossible to miss: an in-run self-check
+that recomputes $\chi^2$ directly from the exported cube and compares it against
+both the reported $\chi^2$ and the truth's floor; and a regression test asserting
+\emph{cube $=$ jitted field} by \textbf{total flux}. The flux integral is the
+essential part---a uniform offset is invisible to a max-pixel comparison, which is
+why the bug survived several rounds of ``the images are identical'' checks.
+
+\section{The method}
+
+\paragraph{Sky model.} The standard NeuralDMD decomposition per Stokes field,
 \begin{equation}
-  Q = m_\ell\,I\,\cos 2\xi,\qquad
-  U = m_\ell\,I\,\sin 2\xi,
-  \label{eq:transform}
+  I(x,t) \;=\; W_0(x)\,b_0 \;+\; 2\,\mathrm{Re}\!\sum_{j=1}^{r} W_j(x)\,b_j\,
+  e^{\Omega_j t_{\mathrm{scale}} t},
 \end{equation}
-with inverse $m_\ell=\sqrt{Q^2+U^2}/I$ and $\xi=\tfrac12\operatorname{atan2}(U,Q)$.
-This is a change of variables, exactly like Cartesian $\leftrightarrow$ polar
-coordinates. Neither $m_\ell$ nor $\xi$ is ``independent'' of $Q,U$---both are
-functions of them---and no information is added or removed. What differs is the
-\emph{shape of the physical region}:
+with a coordinate MLP producing the static mode $W_0$ and the $r$ complex dynamic
+spatial modes $W_j$, and small MLPs producing the spectrum $\Omega_j$ and
+amplitudes $b_j$.
+
+\paragraph{Polarization: fractional, unmodified.}
+\begin{equation}
+  Q = m_\ell\,I\cos 2\xi, \qquad U = m_\ell\,I\sin 2\xi,
+\end{equation}
+with $m_\ell=\texttt{scaling\_ml}\cdot\sigma(\text{raw}-\texttt{outshift})$ and the
+EVPA direction $(\cos2\xi,\sin2\xi)$ from its own networks. This is the original
+chart. It gives $P\le I$ and $Q,U\to0$ as $I\to0$ for free, and---contrary to the
+previous version of this note---it reaches $m\!=\!2$ without difficulty.
+
+\paragraph{Likelihood.} Reduced $\chi^2$ on the native circular products, with
+$RR=I+V$, $LL=I-V$, $RL=Q+iU$, $LR=Q-iU$, each
+$\chi^2=\sum|\Delta|^2\,\mathrm{mask}/\sigma^2 \,/\, (2\sum\mathrm{mask})$ (per real
+degree of freedom; identical to \texttt{ehtim}'s \texttt{chisq\_vis}). We never
+divide by $I$.
+
+\paragraph{Priors.} \emph{None on polarization.} On Stokes $I$: a total-flux
+(lightcurve) anchor and a compactness prior
+$\big\langle\sum_x \mathrm{relu}(I)\,r^2\big\rangle$, both needed only for the
+\emph{dynamic} part (Section~\ref{sec:dyn}).
+
+\paragraph{Configuration.} The two runs below differ only in the $I$ priors and the
+spatial encoding:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & pol-only (\texttt{FIXa}) & pol + dynamics (\texttt{cmp10}) \\
+\midrule
+\texttt{--pol-param}        & \texttt{fractional} & \texttt{fractional} \\
+\texttt{--r} / \texttt{--r-pol} & 8 / full (unstarved) & 8 / full \\
+\texttt{--i-only-epochs}    & 0 (joint, not staged) & 0 \\
+\texttt{--frequencies}      & 2 & \textbf{4} \\
+\texttt{--flux} / \texttt{--flux-weight} & off & \textbf{2.7 / 3} \\
+\texttt{--compact-weight}   & 0 & \textbf{10} \\
+\texttt{--early-stop-chi2}  & 0 (disabled) & 0 (disabled) \\
+\bottomrule
+\end{tabular}
+\end{center}
+Common to both: $12000$ epochs, AdamW, lr $3\times10^{-4}$ decaying $0.5$ per
+$25000$ steps, hidden $256\times4$, \texttt{outshift} $2.0$,
+\texttt{scaling\_ml} $1.0$, \texttt{theta\_max} $1.0$, npix $50$,
+FOV $200\,\mu$as, $64$ frames, batch $8$, seed $0$, disk pretrain $2000$ steps.
+
+\paragraph{Two settings that matter and are not obvious.}
 \begin{itemize}
-  \item In $(I,Q,U)$ coordinates the constraint~\eqref{eq:ple} is the nonlinear
-  coupling $\sqrt{Q^2+U^2}\le I$; free fields ignore it.
-  \item In $(I,m_\ell,\xi)$ coordinates the \emph{same} constraint is the box
-  $m_\ell\in[0,1]$---enforced by one sigmoid---and $m_\ell\in[0,1]$ maps
-  \emph{exactly} onto the physical region of $(I,Q,U)$ space, no more and no less.
-  Support~\eqref{eq:support} is automatic because $Q,U\propto I$.
+  \item \textbf{Disable early stopping.} The default threshold ($\chi^2\le0.8$)
+  sits \emph{above} the truth's own $\chi^2$ (Section~\ref{sec:floor}), so training
+  halts before convergence.
+  \item \textbf{Do not starve polarization.} Reducing the polarized mode count
+  (\texttt{--r-pol 2}) or fitting $I$ first and freezing it were both introduced as
+  anti-overfit measures; neither is needed, and the swirl is recovered without them.
 \end{itemize}
-As a bonus, $m_\ell$ (fraction) and $\xi$ (angle) are the quantities that distinct
-physics controls---emission/absorption set $I$, while magnetic-field geometry and
-Faraday effects set the fraction and angle---so priors and initialization are
-natural in this chart.
 
-\section{The parameterization we adopt}
-Each field is the raw output of a NeuralDMD sub-model, mapped through a bounded
-activation:
-\begin{align}
-  m_\ell(x,t) &= \sigma\!\big(f_{m}(x,t) - s\big)\,\kappa,
-    &&\kappa \le 1,\ \ s=\text{outshift}, \label{eq:ml}\\
-  (\cos 2\xi,\ \sin 2\xi) &=
-    \frac{(f_{c},\ f_{s})}{\sqrt{f_{c}^2+f_{s}^2+\epsilon}},
-    &&\text{(unit EVPA direction)} \label{eq:evpa}\\
-  m_c(x,t) &= 2\big(\sigma(f_{v}-s)-\tfrac12\big),
-    &&V = m_c\,I\ \ \text{(optional)} \label{eq:mc}
-\end{align}
-with $\sigma$ the logistic sigmoid. Stokes $Q,U$ follow from~\eqref{eq:transform}.
+\section{The $\chi^2$ floor is $0.4$, not $1$}
+\label{sec:floor}
 
-Two properties matter:
-\begin{enumerate}
-  \item \textbf{Strict $P\le I$.} Because the EVPA direction in~\eqref{eq:evpa} is
-  unit-normalized, $P=\sqrt{Q^2+U^2}=m_\ell\,|I|$ \emph{exactly}, so
-  $P\le\kappa\,|I|\le I$. (Modeling $\cos2\xi,\sin2\xi$ as two independent
-  bounded outputs would instead allow $P$ up to $\sqrt2\,m_\ell I$, which can
-  violate the bound; the normalization removes that loophole.)
-  \item \textbf{Small-polarization initialization.} The bias $s$ pushes $m_\ell$
-  small at initialization, so the source starts nearly unpolarized and grows
-  polarization only as the cross-hand data demand it---the natural analogue of the
-  disk-template pretraining we apply to $I$. The value of $s$ must be matched to
-  the raw-field scale: with the gauge-fixed, $O(1)$ raw fields used here,
-  $s\!\approx\!2$ gives a small but trainable $m_\ell$, whereas a large $s$
-  (e.g.\ $s\!=\!10$) saturates the sigmoid, starves its gradient, and leaves the
-  reconstruction stuck at zero polarization.
-\end{enumerate}
+Dataset generation calls \texttt{obs.add\_fractional\_noise(0.04)}, whose ehtim
+implementation \emph{inflates $\sigma$ without adding matching noise to the
+visibilities}: $\sigma \leftarrow \sqrt{\sigma^2 + (0.04\,|V|)^2}$. The residual
+therefore stays thermal while the error bars grow, and \textbf{the truth itself
+scores $\chi^2\approx0.42$}. Pushing the truth through the forward operator
+reproduces this on every product ($0.41/0.42/0.37/0.41$), which is also how we
+validate the operator. Two consequences: a $\chi^2$ gate centred on $1$ can never
+pass (it is now $[0.4,2]$), and any early-stop threshold must be set relative to the
+achievable floor. Every run reports \texttt{chi2\_truth\_floor} alongside its own
+$\chi^2$.
 
-\section{Compatibility with ``never divide by $I$''}
-A frequent, valid objection to fractional parameterizations is the numerical
-hazard of dividing by $I$ (which can vanish). We never do: the model
-\emph{multiplies}, $Q=m_\ell I\cos2\xi$, and the likelihood is formed on the
-absolute Stokes visibilities (or, in the circular basis, on $RR,LL,RL,LR$)---not
-on $m_\ell$ or on any quantity requiring $Q/I$. The fractional structure lives
-entirely in the forward model.
+\section{Results}
 
-\section{Summary}
-Modeling $Q,U$ as free fields over-parameterizes the physical state: it admits
-$P>I$ and polarized flux where $I=0$, which is almost certainly how a
-free-$(Q,U)$ fit reaches $\chi^2\!\approx\!1$ with unphysical images. Fitting in
-the $(I,m_\ell,\xi)$ chart with a sigmoid on $m_\ell$ confines the model to
-exactly the physical manifold, ties polarization to the (separately
-regularized) total intensity, and starts the source unpolarized---while keeping
-the likelihood on absolute Stokes. It is the same three degrees of freedom,
-expressed in the coordinates where ``physical'' means ``box-bounded.''
+Synthetic polarized thick m-ring (\texttt{mring+hsCW}): $20\%$ spiral-EVPA linear
+polarization, an unpolarized Gaussian hot spot orbiting at $r\approx28\,\mu$as,
+observed with the EHT 2017 array. $\beta_2$ is the Palumbo $m\!=\!2$ azimuthal
+coefficient of $Q+iU$ over the ring annulus (the EHT/KINE global EVPA measure);
+truth $|\beta_2| = 0.180$. ``DYN'' is the summed per-pixel temporal standard
+deviation of $I$, split inside the ring annulus and beyond $50\,\mu$as.
+
+\begin{center}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+ & $\chi^2_{RR}$ & NRMSE$_I$ & EVPA & $\beta_2$ amp & DYN on-ring & DYN off-src \\
+\midrule
+truth                    & 0.41 & 0     & $0^\circ$   & 1.00  & 0.355 & 0.003 \\
+\midrule
+\texttt{FIXa} (no priors)& 0.78 & 0.286 & $\mathbf{1.8^\circ}$ & $\mathbf{0.941}$ & 0.152 & 0.682 \\
+\texttt{cmp10}           & 0.49 & $\mathbf{0.169}$ & $3.7^\circ$ & 0.902 & 0.267 & 0.161 \\
+\texttt{cmp30}           & 0.71 & 0.189 & $5.4^\circ$ & 0.879 & $\mathbf{0.308}$ & $\mathbf{0.125}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Polarization is recovered by the plain chart with no polarized prior, and is robust:
+across every configuration tried (spatial frequency $2$--$4$, mode count $8$--$16$,
+compactness $0$--$30$) EVPA stays within $1.8$--$5.4^\circ$ and $\beta_2$ within
+$0.88$--$1.36$.
+
+\section{Recovering the hot spot}
+\label{sec:dyn}
+
+With polarization solved, the remaining error is the \emph{dynamic} part of
+Stokes~$I$. The truth's variability lies entirely on the ring ($0.355$ on-ring,
+$0.003$ beyond $50\,\mu$as). Without $I$ priors the reconstruction produces
+\emph{more} total variability than the truth but spreads it over ${\sim}77\,\mu$as
+instead of concentrating it in an orbiting spot: only $43\%$ on-ring, and $0.682$
+off-source---over two orders of magnitude too much. Two things fix it.
+
+\paragraph{Spatial bandwidth.} \texttt{--frequencies 2} makes the finest
+representable feature ${\sim}\mathrm{FOV}/2^2 = 50\,\mu$as, but the hot spot is a
+compact blob orbiting at $r\approx28\,\mu$as: the network cannot resolve it and
+approximates it with broad low-frequency wobble. \texttt{--frequencies 4} lowers the
+floor to ${\sim}12.5\,\mu$as.
+
+\paragraph{Compactness, at the right weight.} Higher bandwidth \emph{alone} makes
+matters worse---it lets more variability leak off-source. It must be paired with the
+compactness prior, whose weight was $10$--$30\times$ too low. The two work together
+and improve $I$, its dynamics, and the haze monotonically:
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\texttt{--compact-weight} (at \texttt{--frequencies 4}) & NRMSE$_I$ & DYN on-ring & DYN off-src \\
+\midrule
+0 (and \texttt{--frequencies 2}) & 0.286 & 0.152 & 0.682 \\
+3   & 0.219 & 0.210 & 0.379 \\
+10  & \textbf{0.169} & 0.267 & 0.161 \\
+30  & 0.189 & \textbf{0.308} & \textbf{0.125} \\
+\bottomrule
+\end{tabular}
+\end{center}
+There is a mild cost to polarization as the weight rises (EVPA $1.8^\circ\to5.4^\circ$,
+$\beta_2$ $0.94\to0.88$), so the setting is a balance rather than a maximum;
+\texttt{--compact-weight 10} is the current recommendation.
+
+\section{What is still open}
+
+\begin{itemize}
+  \item \textbf{NRMSE$_{Q,U}\approx0.26$--$0.30$} against a $0.15$ target. The target
+  may be unrealistic for this coverage: KINE reports the global $\angle\beta_2$ and
+  explicitly not per-pixel EVPA.
+  \item \textbf{Off-source dynamic haze} $0.125$--$0.161$ vs.\ a truth of $0.003$.
+  Unlike the static haze of Section~\ref{sec:bug} this one is real: it survives the
+  fix and lives in the short-baseline null space, where the array has no leverage.
+  \item \textbf{Gains and D-terms} are not in this forward model. Gain-corrupted data
+  cannot be fit by a gain-free model---a first attempt on a gain-corrupted on-sky
+  UVFITS reached $\chi^2_{RR}\approx1380$. \texttt{StationGains} exists on a separate
+  branch and is not yet wired into the polarized likelihood.
+  \item Several parameterizations (\texttt{direct}, \texttt{iscaled}, \texttt{expm},
+  \texttt{expm\_full}) and priors (support, radial polarized compactness, polarized
+  $L_1$, dynamic-mode compactness) remain in the codebase, off by default. They were
+  built against the phantom haze and, on present evidence, are unnecessary. They are
+  retained rather than removed pending re-evaluation on the corrected export.
+\end{itemize}
+
+\section*{Methodological note}
+
+The haze was accepted as physics for four working sessions and motivated an entire
+family of parameterizations and priors. It was never real. What made it durable is
+that the reported $\chi^2$ was correct while the images were wrong---nothing in the
+pipeline compared the object being optimized against the object being measured. The
+two guards of Section~\ref{sec:bug} now assert exactly that equality, and the one
+that matters compares \emph{integrated flux}: the discrepancy was a uniform offset,
+which every per-pixel comparison we ran reported as ``identical''.
+
 \end{document}

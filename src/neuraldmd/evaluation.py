@@ -3,6 +3,7 @@
 import os
 import warnings
 
+import equinox as eqx
 import h5py
 import imageio.v3 as iio
 import jax.numpy as jnp
@@ -247,6 +248,18 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
 # ---------------------------------------------------------------------------
 
 
+@eqx.filter_jit
+def _stokes_fields_jit(model, xy, times, frame_max, frame_min):
+    """``model.stokes_fields`` under jit -- the same path training evaluates.
+
+    Eager and jitted evaluation of ``stokes_fields`` do NOT agree: eagerly the field
+    picks up a near-uniform ~3e-3/pixel positive offset (~7.3 Jy over a 50x50 grid),
+    which is what every exported cube has been carrying. ``frame_max``/``frame_min``
+    are dicts of Python floats, so ``filter_jit`` treats them as static.
+    """
+    return model.stokes_fields(xy, times, frame_max, frame_min)
+
+
 def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=np.pi, fov_y=np.pi):
     """Reconstruct per-Stokes image cubes from a ``PolarizedNeuralDMD``.
 
@@ -271,7 +284,13 @@ def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=
     """
     xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
     times = jnp.asarray(np.asarray(times, dtype=np.float32))
-    images, _ = model.stokes_fields(xy, times, frame_max, frame_min)
+    # Evaluate under jit, exactly as training does. Called eagerly, `stokes_fields`
+    # returns a systematically different field: a near-uniform positive offset of
+    # ~3e-3 per pixel, i.e. ~7.3 Jy of spurious diffuse flux over a 50x50 grid
+    # (measured: eager flux/frame 9.95 vs jitted 2.63 against a truth of 2.7). That
+    # offset is the "off-source haze" -- an artifact of the eager path, not the model.
+    # Jitted, this reproduces the chi2 the training loop reports (9.565 vs 9.565).
+    images, _ = _stokes_fields_jit(model, xy, times, frame_max, frame_min)
     return {s: np.asarray(images[s]).T.reshape(len(times), npix, npix) for s in images}
 
 
@@ -282,6 +301,40 @@ def polarized_nrmse(recon, truth):
         r, t = np.asarray(recon[s]), np.asarray(truth[s])
         denom = np.linalg.norm(t)
         out[s] = float(np.linalg.norm(r - t) / denom) if denom > 0 else float("nan")
+    return out
+
+
+def blur_polarized_cubes(cubes, fwhm_uas, fov_uas):
+    """Convolve every Stokes cube with a circular Gaussian beam.
+
+    Interferometric images are only constrained up to the array resolution, so
+    image-fidelity metrics are conventionally also quoted after restoring both
+    reconstruction and truth to a common beam.
+
+    Parameters
+    ----------
+    cubes : dict of str -> numpy.ndarray
+        ``{stokes: (T, H, W)}`` image cubes.
+    fwhm_uas : float
+        Beam FWHM [micro-arcsec]; ``<= 0`` returns the input unchanged.
+    fov_uas : float
+        Field of view [micro-arcsec] of the image grid.
+
+    Returns
+    -------
+    dict of str -> numpy.ndarray
+        Blurred cubes with the same shapes and keys.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    if fwhm_uas <= 0:
+        return cubes
+    out = {}
+    for s, cube in cubes.items():
+        cube = np.asarray(cube)
+        npix = cube.shape[-1]
+        sigma_pix = (fwhm_uas / (fov_uas / npix)) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        out[s] = gaussian_filter(cube, sigma=(0.0, sigma_pix, sigma_pix))
     return out
 
 
@@ -305,33 +358,81 @@ def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     return float(np.degrees(np.median(np.abs(diff))))
 
 
-def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, skip=None):
+def beta2_coefficient(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """Complex m=2 azimuthal coefficient of the linear polarization (Palumbo 2020).
+
+    ``beta2 = sum_annulus (Q + iU) e^{+2i phi} / sum_annulus I`` over the annulus
+    ``rmin_uas .. rmax_uas``. Its phase is the dominant EVPA-swirl orientation and
+    its magnitude the m=2 polarized fraction -- the EHT-standard global EVPA
+    descriptor. The ``+2i phi`` sign selects the mode an azimuthally-winding
+    ("spiral") EVPA populates (matches the nonzero mode of ``ehtim.betamodes``);
+    the opposite sign returns the empty conjugate mode. Time axis is averaged.
+    """
+    q, u, i = np.asarray(q), np.asarray(u), np.asarray(i)
+    if q.ndim == 3:
+        q, u, i = q.mean(0), u.mean(0), i.mean(0)
+    h, w = i.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    rho = np.hypot(xx - (w - 1) / 2, yy - (h - 1) / 2) * (fov_uas / w)
+    phi = np.arctan2(yy - (h - 1) / 2, xx - (w - 1) / 2)
+    ann = (rho > rmin_uas) & (rho < rmax_uas)
+    den = i[ann].sum()
+    if den == 0:
+        return 0.0 + 0.0j
+    return complex(((q + 1j * u)[ann] * np.exp(2j * phi[ann])).sum() / den)
+
+
+def beta2_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """``(|beta2|_recon/|beta2|_truth, angle(beta2) error [deg])`` for the m=2 mode.
+
+    The EHT/KINE-standard global EVPA metric: the amplitude ratio says how much of
+    the true m=2 polarized swirl was recovered, and the wrapped phase error gives
+    its orientation error -- both robust to the local pixel-EVPA scatter that
+    ``evpa_error_deg`` reports. ``beta2`` of the truth on this ring is ~0.18.
+    """
+    bt = beta2_coefficient(truth["Q"], truth["U"], truth["I"], fov_uas, rmin_uas, rmax_uas)
+    br = beta2_coefficient(recon["Q"], recon["U"], recon["I"], fov_uas, rmin_uas, rmax_uas)
+    amp_ratio = float(abs(br) / (abs(bt) + 1e-12))
+    dphi = float((np.degrees(np.angle(br) - np.angle(bt)) + 180) % 360 - 180)
+    return amp_ratio, dphi
+
+
+def _evpa_quiver(
+    ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vmax=None, skip=None, quiver=True
+):
     """Overlay EVPA ticks on a Stokes-I background (EHT dynamics-plot convention).
 
     Ticks point along ``(-sin chi, cos chi)`` with ``chi = 0.5*angle(Q + iU)``,
     have length proportional to the polarized intensity, and are colored by the
     fractional polarization; the intensity map uses ``afmhot`` with RA increasing
-    to the left. Ticks are masked where I or P is below 10% of its peak.
+    to the left. Ticks are masked where |I| or P is below 10% of its peak.
 
     Parameters
     ----------
     ax : matplotlib.axes.Axes
         Target axes.
     intensity, q, u : numpy.ndarray
-        ``(H, W)`` Stokes I, Q, U maps for a single frame.
+        ``(H, W)`` Stokes I, Q, U maps for a single frame (I may be signed, e.g.
+        a dynamic residual).
     fov_uas : float
         Field of view [micro-arcsec] setting the tick geometry.
     cmap_bg : str, optional
         Background colormap for Stokes I. Default ``"afmhot"``.
-    vmax : float or None, optional
-        Upper limit of the intensity color scale (``None`` autoscales).
+    vmin, vmax : float or None, optional
+        Intensity color-scale limits (``vmin=0`` and autoscaled ``vmax`` by
+        default; pass symmetric limits with a diverging ``cmap_bg`` for
+        residual maps).
     skip : int or None, optional
         Draw one tick every ``skip`` pixels (default ``~W/20``).
+    quiver : bool, optional
+        If ``False``, draw only the intensity background and no EVPA ticks
+        (useful where the polarization is meaningless, e.g. a dynamic residual).
+        Default ``True``.
 
     Returns
     -------
-    tuple of (matplotlib.quiver.Quiver, matplotlib.image.AxesImage)
-        The tick and background-image artists.
+    tuple of (matplotlib.quiver.Quiver or None, matplotlib.image.AxesImage)
+        The tick (``None`` when ``quiver`` is ``False``) and background artists.
     """
     from matplotlib.colors import Normalize
 
@@ -343,11 +444,15 @@ def _evpa_quiver(ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmax=None, s
         intensity,
         cmap=cmap_bg,
         origin="upper",
-        vmin=0.0,
+        vmin=vmin,
         vmax=vmax,
         extent=lims,
         interpolation="bicubic",
     )
+    if not quiver:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return None, bg
 
     px = fov_uas / nx
     yy, xx = np.mgrid[slice(-fov_uas / 2, fov_uas / 2, px), slice(-fov_uas / 2, fov_uas / 2, px)]
@@ -463,4 +568,156 @@ def make_polarized_gif(cubes, path, fps=10, cmap="afmhot", fov_uas=200.0):
         plt.close(fig)
 
     iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
+    print(f"Saved {path}")
+
+
+def make_polarized_comparison_gif(
+    recon, truth, path, fps=10, fov_uas=200.0, times=None, dynamic_quiver=False
+):
+    """Animate truth vs reconstruction in the EHT dynamics-plot layout.
+
+    Two rows (truth, reconstruction) by three columns per frame:
+
+    * **Total** -- the per-frame Stokes I with EVPA ticks,
+    * **Dynamic** -- I minus its time mean on a symmetric diverging scale (EVPA
+      ticks only if ``dynamic_quiver``), with a contour of the truth dynamic
+      emission over the reconstruction panel,
+    * **Static** -- the time-mean I with the time-mean-pol EVPA ticks.
+
+    All intensity panels share color scales across rows and frames so truth and
+    reconstruction are directly comparable.
+
+    Parameters
+    ----------
+    recon, truth : dict of str -> numpy.ndarray
+        ``{"I": (T, H, W), "Q": ..., "U": ...}`` cubes on the same grid/times.
+    path : str
+        Output GIF path.
+    fps : int, optional
+        Frames per second. Default 10.
+    fov_uas : float, optional
+        Field of view [micro-arcsec]. Default 200.
+    times : numpy.ndarray or None, optional
+        ``(T,)`` frame times for the title (normalized or hours).
+    dynamic_quiver : bool, optional
+        Draw EVPA ticks on the Dynamic column too. Off by default -- for a model
+        whose polarization is essentially static, the residual EVPA is noise.
+
+    Returns
+    -------
+    None
+        Writes the GIF to ``path``.
+    """
+    keys = ("I", "Q", "U")
+    rc = {s: np.asarray(recon[s]) for s in keys}
+    tc = {s: np.asarray(truth[s]) for s in keys}
+    n_t = rc["I"].shape[0]
+    static_t = {s: tc[s].mean(axis=0) for s in keys}
+    static_r = {s: rc[s].mean(axis=0) for s in keys}
+    dyn_t = {s: tc[s] - static_t[s][None] for s in keys}
+    dyn_r = {s: rc[s] - static_r[s][None] for s in keys}
+    vmax_i = float(max(tc["I"].max(), rc["I"].max())) or 1.0
+    max_dyn = float(max(np.abs(dyn_t["I"]).max(), np.abs(dyn_r["I"]).max())) or 1.0
+    lims = [fov_uas / 2, -fov_uas / 2, -fov_uas / 2, fov_uas / 2]
+
+    frames = []
+    for t in range(n_t):
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8), dpi=90)
+        rows = (("truth", tc, dyn_t, static_t), ("recon", rc, dyn_r, static_r))
+        for i, (label, cube, dyn, static) in enumerate(rows):
+            _evpa_quiver(axes[i, 0], cube["I"][t], cube["Q"][t], cube["U"][t], fov_uas, vmax=vmax_i)
+            _evpa_quiver(
+                axes[i, 1],
+                dyn["I"][t],
+                dyn["Q"][t],
+                dyn["U"][t],
+                fov_uas,
+                cmap_bg="coolwarm",
+                vmin=-max_dyn,
+                vmax=max_dyn,
+                quiver=dynamic_quiver,
+            )
+            _evpa_quiver(axes[i, 2], static["I"], static["Q"], static["U"], fov_uas, vmax=vmax_i)
+            axes[i, 0].set_ylabel(label, fontsize=14)
+        # truth dynamic emission outlined over the reconstruction's dynamic panel
+        axes[1, 1].contour(
+            np.abs(dyn_t["I"][t]),
+            levels=[0.3 * max_dyn],
+            extent=lims,
+            colors="black",
+            alpha=0.7,
+            linewidths=1,
+            origin="upper",
+        )
+        for j, title in enumerate(("Total", "Dynamic", "Static")):
+            axes[0, j].set_title(title, fontsize=14)
+        if times is not None:
+            fig.suptitle(f"t = {float(times[t]):.2f}", fontsize=14)
+        fig.tight_layout()
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
+        plt.close(fig)
+
+    iio.imwrite(path, np.stack(frames), duration=int(1000 / fps), loop=0)
+    print(f"Saved {path}")
+
+
+def plot_training_history(history, path, floor=None, title=None):
+    """Plot the training loss, per-key chi-squared, and gradient norm vs epoch.
+
+    The chi-squared panel overlays the *true* per-epoch chi-squared (the model
+    re-evaluated on the full data, solid) against the per-batch training proxy
+    (dashed) so a decoupling between them is visible at a glance.
+
+    Parameters
+    ----------
+    history : dict
+        As returned by :func:`neuraldmd.training.train_polarized_model`:
+        ``{"total": [...], "grad_norm": [...], "chi2": {key: [...]},
+        "train_chi2": {key: [...]}}``.
+    path : str
+        Output PNG path.
+    floor : float or None, optional
+        Draw a reference line at this chi-squared (e.g. the truth-through-A
+        noise floor). Default ``None``.
+    title : str or None, optional
+        Figure suptitle.
+
+    Returns
+    -------
+    None
+        Writes the figure to ``path``.
+    """
+    ep = np.arange(1, len(history["total"]) + 1)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    axes[0].plot(ep, history["total"], lw=1)
+    axes[0].set_yscale("log")
+    axes[0].set_title("total loss")
+    axes[0].set_xlabel("epoch")
+
+    for k in history["chi2"]:
+        (line,) = axes[1].plot(ep, history["chi2"][k], lw=1, label=f"{k}")
+        if history.get("train_chi2", {}).get(k):
+            axes[1].plot(
+                ep, history["train_chi2"][k], "--", color=line.get_color(), lw=0.8, alpha=0.4
+            )
+    axes[1].axhline(1.0, color="k", ls=":", lw=0.8)
+    if floor is not None:
+        axes[1].axhline(floor, color="r", ls=":", lw=0.9, label=f"floor {floor:.2f}")
+    axes[1].set_yscale("log")
+    axes[1].set_title("chi2 (solid=true, dashed=train)")
+    axes[1].set_xlabel("epoch")
+    axes[1].legend(fontsize=7, ncol=2)
+
+    if history.get("grad_norm"):
+        axes[2].plot(ep, history["grad_norm"], lw=1, color="tab:purple")
+        axes[2].set_yscale("log")
+        axes[2].set_title("gradient norm")
+        axes[2].set_xlabel("epoch")
+
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved {path}")

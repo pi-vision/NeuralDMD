@@ -93,3 +93,21 @@ def test_end_to_end_minitrain_reduces_loss(tmp_path):
     for s in op.stokes:
         assert hist["chi2"][s][-1] < hist["chi2"][s][0]
     assert (tmp_path / "polarized_model.eqx").exists()
+
+
+def test_times_roundtrip_and_loader_preference(tmp_path):
+    """ObsProducts.times survives the obs_dir round trip, and the loader uses
+    the dataset's (non-uniform) frame times instead of uniform frame indices."""
+    op = _fittable_obs(t=6)
+    tvals = np.array([0.0, 0.10, 0.22, 0.55, 0.80, 1.0], np.float32)  # non-uniform
+    op = ObsProducts(op.A, op.stokes, op.targets, op.sigmas, op.masks, times=tvals)
+    op.to_obs_dir(tmp_path)
+    back = ObsProducts.from_obs_dir(tmp_path)
+    np.testing.assert_allclose(back.times, tvals)
+
+    loader = PolarizedDMDDataLoader(back, npix=8, batch_size=2, epochs=1)
+    np.testing.assert_allclose(loader.times, tvals)  # not linspace
+    # legacy dataset (no times) still falls back to frame-index times
+    op0 = _fittable_obs(t=6)
+    loader0 = PolarizedDMDDataLoader(op0, npix=8, batch_size=2, epochs=1)
+    np.testing.assert_allclose(loader0.times, np.linspace(0, 1, 6, dtype=np.float32))

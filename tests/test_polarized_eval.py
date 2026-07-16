@@ -5,7 +5,12 @@ from __future__ import annotations
 import jax
 import numpy as np
 
-from neuraldmd.evaluation import evpa_error_deg, polarized_nrmse, reconstruct_polarized_cubes
+from neuraldmd.evaluation import (
+    blur_polarized_cubes,
+    evpa_error_deg,
+    polarized_nrmse,
+    reconstruct_polarized_cubes,
+)
 from neuraldmd.polarized import PolarizedNeuralDMD
 
 MODEL_KW = dict(
@@ -49,3 +54,26 @@ def test_reconstruct_cubes_shape():
     assert set(cubes) == {"I", "Q", "U"}
     for s in cubes:
         assert cubes[s].shape == (4, 8, 8)
+
+
+def test_blur_polarized_cubes_identity_and_beam():
+    """fwhm<=0 is the identity; a positive beam conserves flux and lowers the
+    peak of a point source by the expected Gaussian-beam factor."""
+    t, n = 2, 33
+    cube = np.zeros((t, n, n), np.float64)
+    cube[:, n // 2, n // 2] = 1.0  # unit point source
+    cubes = {"I": cube, "Q": 0.5 * cube}
+
+    same = blur_polarized_cubes(cubes, 0.0, fov_uas=200.0)
+    assert same["I"] is cube  # untouched
+
+    fwhm, fov = 15.0, 200.0
+    out = blur_polarized_cubes(cubes, fwhm, fov_uas=fov)
+    # flux conserved per frame
+    np.testing.assert_allclose(out["I"].sum(axis=(1, 2)), 1.0, rtol=1e-6)
+    # peak of a delta blurred by a Gaussian: 1 / (2*pi*sigma_pix^2)
+    sigma_pix = (fwhm / (fov / n)) / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    expected_peak = 1.0 / (2.0 * np.pi * sigma_pix**2)
+    np.testing.assert_allclose(out["I"][:, n // 2, n // 2], expected_peak, rtol=0.02)
+    # linearity: Q = 0.5 * I everywhere
+    np.testing.assert_allclose(out["Q"], 0.5 * out["I"], rtol=1e-12)

@@ -170,6 +170,37 @@ def _zero_intensity_update(updates):
     return eqx.tree_at(lambda u: u.intensity, updates, zeroed)
 
 
+def _scale_pol_update(updates, factor):
+    """Scale the polarization sub-models' updates by ``factor`` in ``[0, 1]``.
+
+    A soft learning-rate warmup/freeze for the fractional-pol fields (``frac``,
+    ``cos2xi``, ``sin2xi``, and ``circ`` when present) while Stokes I converges:
+    ``factor=0`` freezes polarization, ``factor=1`` trains it at the full rate.
+
+    Parameters
+    ----------
+    updates : PolarizedNeuralDMD
+        Filtered optimizer-update pytree (same structure as the model params).
+    factor : float or jax.Array
+        Multiplicative scale applied to every polarization-field leaf.
+
+    Returns
+    -------
+    PolarizedNeuralDMD
+        ``updates`` with the polarization sub-model leaves scaled by ``factor``.
+    """
+
+    def scaled(sub):
+        return jax.tree_util.tree_map(lambda x: x * factor, sub)
+
+    updates = eqx.tree_at(lambda u: u.frac, updates, scaled(updates.frac))
+    updates = eqx.tree_at(lambda u: u.cos2xi, updates, scaled(updates.cos2xi))
+    updates = eqx.tree_at(lambda u: u.sin2xi, updates, scaled(updates.sin2xi))
+    if updates.circ is not None:
+        updates = eqx.tree_at(lambda u: u.circ, updates, scaled(updates.circ))
+    return updates
+
+
 @eqx.filter_jit
 def polarized_train_step(
     model,
@@ -185,19 +216,31 @@ def polarized_train_step(
     frame_min,
     *,
     freeze_intensity: bool = False,
+    pol_scale=1.0,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
+    compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
+    pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
-    Differentiates the loss with respect to the whole model pytree. When
-    ``freeze_intensity`` is set, the Stokes-I (``intensity``) sub-model's update
-    is zeroed (held fixed) -- the hierarchical study mode (fit polarization on a
-    frozen I). All keyword-only arguments are static under ``eqx.filter_jit``.
+    Differentiates the loss with respect to the whole model pytree. The
+    polarization-field updates are scaled by ``pol_scale`` (a soft LR
+    warmup/freeze) and, when ``freeze_intensity`` is set, the Stokes-I
+    (``intensity``) sub-model's update is zeroed (held fixed) -- the hierarchical
+    study mode (fit polarization on a frozen I). Pass ``pol_scale`` as a JAX
+    scalar so the ramp does not retrigger ``eqx.filter_jit``; the other
+    keyword-only arguments are static.
 
     Returns
     -------
@@ -223,10 +266,20 @@ def polarized_train_step(
             w_sparse_weight=w_sparse_weight,
             b_sparse_weight=b_sparse_weight,
             p_le_i_weight=p_le_i_weight,
+            flux_target=flux_target,
+            flux_weight=flux_weight,
+            compact_weight=compact_weight,
+            compact_pol_weight=compact_pol_weight,
+            pol_support_weight=pol_support_weight,
+            pol_support_tau=pol_support_tau,
+            pol_l1_weight=pol_l1_weight,
+            dyn_compact_weight=dyn_compact_weight,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
+    aux = {**aux, "grad_norm": optax.global_norm(grads)}
     updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
+    updates = _scale_pol_update(updates, pol_scale)  # soft pol LR warmup/freeze
     if freeze_intensity:
         updates = _zero_intensity_update(updates)
     model = eqx.apply_updates(model, updates)
@@ -244,12 +297,21 @@ def polarized_train_epoch(
     frame_min,
     *,
     freeze_intensity: bool = False,
+    pol_scale=1.0,
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     neg_weight: float = 1.0,
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
+    compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
+    pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
 ):
     """Scan :func:`polarized_train_step` over one epoch's batches.
 
@@ -261,8 +323,9 @@ def polarized_train_epoch(
 
     Returns
     -------
-    model, opt_state, mean_loss, mean_chi2
-        ``mean_chi2`` is a dict keyed like the data (Stokes or product).
+    model, opt_state, mean_loss, mean_chi2, mean_grad_norm
+        ``mean_chi2`` is a dict keyed like the data (Stokes or product);
+        ``mean_grad_norm`` is the mean global gradient norm over the epoch.
     """
     pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b = epoch_data
     keys = tuple(tgt_b.keys())
@@ -284,21 +347,86 @@ def polarized_train_epoch(
             frame_max,
             frame_min,
             freeze_intensity=freeze_intensity,
+            pol_scale=pol_scale,
             basis=basis,
             products=products,
             neg_weight=neg_weight,
             w_sparse_weight=w_sparse_weight,
             b_sparse_weight=b_sparse_weight,
             p_le_i_weight=p_le_i_weight,
+            flux_target=flux_target,
+            flux_weight=flux_weight,
+            compact_weight=compact_weight,
+            compact_pol_weight=compact_pol_weight,
+            pol_support_weight=pol_support_weight,
+            pol_support_tau=pol_support_tau,
+            pol_l1_weight=pol_l1_weight,
+            dyn_compact_weight=dyn_compact_weight,
         )
-        return (model, opt_state, key), (loss, aux["chi2_vis"])
+        return (model, opt_state, key), (loss, aux["chi2_vis"], aux["grad_norm"])
 
     n_batches = as_b.shape[0]
-    (model, opt_state, _), (loss_log, chi2_log) = jax.lax.scan(
+    (model, opt_state, _), (loss_log, chi2_log, gnorm_log) = jax.lax.scan(
         scan_fn, (model, opt_state, key), jnp.arange(n_batches)
     )
     mean_chi2 = {k: jnp.mean(v) for k, v in chi2_log.items()}
-    return model, opt_state, jnp.mean(loss_log), mean_chi2
+    return model, opt_state, jnp.mean(loss_log), mean_chi2, jnp.mean(gnorm_log)
+
+
+@eqx.filter_jit
+def _eval_chi2_full(
+    model, xy, times, a, targets, sigmas, masks, frame_max, frame_min, *, basis, products
+):
+    """True per-product chi-squared of ``model`` on the full dataset.
+
+    Unlike the per-batch training chi-squared -- which is a mean over the
+    model *as it evolves through the epoch*, evaluated on jittered coordinates
+    -- this reconstructs the (fixed) model once on the exact pixel grid at every
+    frame and pushes it through the operator. It is the number that actually
+    reflects the reconstruction, so it (not the training proxy) must drive
+    checkpointing and early stopping.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        Current model.
+    xy : jax.Array
+        ``(P, 2)`` pixel coordinates (no jitter).
+    times : jax.Array
+        ``(T,)`` normalized frame times (all frames).
+    a : jax.Array
+        ``(T, M, P)`` image->visibility operator.
+    targets, sigmas, masks : dict of str -> jax.Array
+        Full ``(T, M)`` per-key visibility products, errors, masks.
+    frame_max, frame_min : dict
+        Stokes-I output scaling.
+    basis : str
+        Fidelity basis (``"stokes"`` or ``"circular"``).
+    products : tuple of str
+        Products to score (circular basis).
+
+    Returns
+    -------
+    dict of str -> jax.Array
+        Per-key scalar chi-squared.
+    """
+    _, aux = polarized_loss_fn(
+        model,
+        xy,
+        targets,
+        sigmas,
+        masks,
+        a,
+        times,
+        frame_max,
+        frame_min,
+        basis=basis,
+        products=products,
+        neg_weight=0.0,
+        w_sparse_weight=0.0,
+        b_sparse_weight=0.0,
+    )
+    return aux["chi2_vis"]
 
 
 def train_polarized_model(
@@ -313,6 +441,9 @@ def train_polarized_model(
     basis: str = "stokes",
     products: tuple[str, ...] = ("RR", "LL", "RL", "LR"),
     freeze_intensity: bool = False,
+    freeze_pol: bool = False,
+    pol_warmup_epochs: int = 0,
+    freeze_i_after: int | None = None,
     initial_lr: float = 3e-4,
     weight_decay: float = 1e-4,
     optimizer_name: str = "adamw",
@@ -322,6 +453,14 @@ def train_polarized_model(
     w_sparse_weight: float = 1.0,
     b_sparse_weight: float = 1.0,
     p_le_i_weight: float = 0.0,
+    flux_target: float | None = None,
+    flux_weight: float = 1.0,
+    compact_weight: float = 0.0,
+    compact_pol_weight: float = 0.0,
+    pol_support_weight: float = 0.0,
+    pol_support_tau: float = 0.05,
+    pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
     print_every: int = 50,
     early_stop_chi2: float | None = None,
     early_stop_epochs: int = 3,
@@ -335,12 +474,25 @@ def train_polarized_model(
     for ``early_stop_epochs`` consecutive epochs (``None`` disables). Use a
     threshold below 1 when systematic noise inflates sigma -- the truth then sits
     at chi^2 < 1, so stopping at 1 leaves the images under-sharpened. The best
-    (lowest-loss) model is checkpointed.
+    (lowest worst-product chi^2) model is checkpointed and returned.
+
+    In the circular basis, ``products`` may be a subset (e.g. ``("RR", "LL")``
+    fits only the parallel hands = Stokes I when V is absent); the chi-squared
+    history, early stopping, and checkpoint metric then cover just those
+    products. ``freeze_pol`` zeroes every polarization-field update (an exact
+    freeze, including weight decay) -- with it, an RR/LL-only stage trains I
+    alone while the polarization fields stay at their near-unpolarized
+    initialization. ``pol_warmup_epochs`` instead ramps the polarization
+    learning rate linearly from 0 to full; ``freeze_i_after`` hard-freezes
+    Stokes I from that epoch onward (fit polarization on a fixed I, as in a
+    staged reconstruction).
 
     Returns
     -------
     model, history
-        ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists).
+        ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists,
+        keyed by ``products`` in the circular basis and by the loader keys
+        otherwise).
     """
     os.makedirs(models_dir, exist_ok=True)
     optimizer = make_polarized_optimizer(
@@ -354,15 +506,38 @@ def train_polarized_model(
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     ckpt_path = os.path.join(models_dir, "polarized_model.eqx")
 
-    history = {"total": [], "chi2": {k: [] for k in loader.keys}}
+    # the loss only produces chi2 for the fitted keys (a product subset in the
+    # circular basis), so history/early-stop/checkpointing are keyed off those
+    hist_keys = tuple(products) if basis == "circular" else tuple(loader.keys)
+    # full-dataset arrays for the true per-epoch chi2 (drives best/early-stop)
+    xy_eval = jnp.asarray(loader.pixel_coords)
+    t_eval = jnp.asarray(loader.times)
+    a_eval = jnp.asarray(loader.op.A)
+    tgt_eval = {k: jnp.asarray(loader.op.targets[k]) for k in hist_keys}
+    sig_eval = {k: jnp.asarray(loader.op.sigmas[k]) for k in hist_keys}
+    msk_eval = {k: jnp.asarray(loader.op.masks[k]) for k in hist_keys}
+    history = {
+        "total": [],
+        "grad_norm": [],
+        "chi2": {k: [] for k in hist_keys},
+        "train_chi2": {k: [] for k in hist_keys},
+    }
     best_metric = float("inf")
+    best_model = None
     at_noise = 0
 
     with tqdm(total=num_epochs) as pbar:
         for epoch in range(num_epochs):
             epoch_data = loader.get_epoch_data(epoch)
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
-            model, opt_state, loss, chi2 = polarized_train_epoch(
+            # pol-LR curriculum: ramp polarization updates 0 -> 1 over the warmup
+            # so Stokes I converges first, then fit polarization at full rate
+            # (freeze_pol pins them at 0 for the whole call: an I-only stage)
+            ramp = min(1.0, (epoch + 1) / pol_warmup_epochs) if pol_warmup_epochs > 0 else 1.0
+            pol_scale = jnp.asarray(0.0 if freeze_pol else ramp, dtype=jnp.float32)
+            # optional hard freeze of the (by now converged) I during the pol tail
+            freeze_i = freeze_intensity or (freeze_i_after is not None and epoch >= freeze_i_after)
+            model, opt_state, loss, chi2, grad_norm = polarized_train_epoch(
                 model,
                 opt_state,
                 epoch_data,
@@ -370,39 +545,70 @@ def train_polarized_model(
                 epoch_key,
                 frame_max,
                 frame_min,
-                freeze_intensity=freeze_intensity,
+                freeze_intensity=freeze_i,
+                pol_scale=pol_scale,
                 basis=basis,
                 products=products,
                 neg_weight=neg_weight,
                 w_sparse_weight=w_sparse_weight,
                 b_sparse_weight=b_sparse_weight,
                 p_le_i_weight=p_le_i_weight,
+                flux_target=flux_target,
+                flux_weight=flux_weight,
+                compact_weight=compact_weight,
+                compact_pol_weight=compact_pol_weight,
+                pol_support_weight=pol_support_weight,
+                pol_support_tau=pol_support_tau,
+                pol_l1_weight=pol_l1_weight,
+                dyn_compact_weight=dyn_compact_weight,
             )
+            # TRUE chi2 of the end-of-epoch model on the full data, no jitter --
+            # the per-batch training chi2 is a mean over the evolving model and
+            # does NOT reflect the saved snapshot (it can silently diverge within
+            # the epoch), so best/early-stop/report must use this instead
+            eval_chi2 = _eval_chi2_full(
+                model,
+                xy_eval,
+                t_eval,
+                a_eval,
+                tgt_eval,
+                sig_eval,
+                msk_eval,
+                frame_max,
+                frame_min,
+                basis=basis,
+                products=products,
+            )
+            eval_chi2 = {k: float(eval_chi2[k]) for k in hist_keys}
             history["total"].append(float(loss))
-            for k in loader.keys:
-                history["chi2"][k].append(float(chi2[k]))
-            mean_chi2 = float(sum(chi2.values()) / len(chi2))
-            max_chi2 = float(max(chi2.values()))
+            history["grad_norm"].append(float(grad_norm))
+            for k in hist_keys:
+                history["chi2"][k].append(eval_chi2[k])
+                history["train_chi2"][k].append(float(chi2[k]))
+            max_chi2 = float(max(eval_chi2.values()))
 
-            pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{mean_chi2:.3f}")
+            pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{max_chi2:.3f}")
             pbar.update(1)
             if (epoch + 1) % print_every == 0:
-                per_key = "  ".join(f"chi2_{k}={float(chi2[k]):.3f}" for k in loader.keys)
+                per_key = "  ".join(f"chi2_{k}={eval_chi2[k]:.3f}" for k in hist_keys)
                 print(
                     f"Epoch {epoch + 1}/{num_epochs}  loss={float(loss):.5f}  {per_key}",
                     flush=True,
                 )
 
-            # track the best on the worst-product chi2 so the saved model targets
-            # the gate (all chi2 -> 1), not an epoch where the polarized products
-            # merely overfit below the noise floor while I is still poor
+            # track the best on the worst-product (true) chi2. Keep the winner IN
+            # MEMORY (equinox models are immutable pytrees, so this is a free, exact
+            # reference) and serialise only as an artifact: round-tripping the live
+            # model through an 11 MB file rewritten hundreds of times on NFS was
+            # silently returning a stale early snapshot, so the evaluated model had
+            # chi2 ~72-116 (untrained) no matter how long training ran, while the
+            # history correctly recorded the real trajectory.
             if max_chi2 < best_metric:
                 best_metric = max_chi2
+                best_model = model
                 eqx.tree_serialise_leaves(ckpt_path, model)
 
             if early_stop_chi2 is not None:
-                # per-product: every key must be at/below threshold (not the mean),
-                # so I keeps sharpening even after the pol products reach the floor
                 at_noise = at_noise + 1 if max_chi2 <= early_stop_chi2 else 0
                 if at_noise >= early_stop_epochs:
                     print(
@@ -411,10 +617,36 @@ def train_polarized_model(
                     )
                     break
 
-    # evaluate/return the BEST checkpoint, not the last: late-stage LR noise makes
-    # the final epoch a poor snapshot, and the driver evaluates the returned model
-    model = eqx.tree_deserialise_leaves(ckpt_path, model)
-    print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}")
+    # return the BEST checkpoint, not the last: late-stage LR noise makes the final
+    # epoch a poor snapshot, and the driver evaluates the returned model. Taken from
+    # memory, never re-read from disk (see the serialise site above).
+    model = best_model if best_model is not None else model
+    # VERIFY: the returned model is what the driver evaluates and exports, so it must
+    # actually score `best_metric`. A silent mismatch here means every downstream
+    # metric describes a model the history never saw.
+    restored_chi2 = _eval_chi2_full(
+        model,
+        xy_eval,
+        t_eval,
+        a_eval,
+        tgt_eval,
+        sig_eval,
+        msk_eval,
+        frame_max,
+        frame_min,
+        basis=basis,
+        products=products,
+    )
+    restored_max = float(max(float(v) for v in restored_chi2.values()))
+    print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}", flush=True)
+    if abs(restored_max - best_metric) > 0.05 * max(best_metric, 1e-9):
+        print(
+            f"[WARN] restored checkpoint scores max chi2 {restored_max:.3f}, but the "
+            f"history recorded {best_metric:.3f} for it -- the returned model is NOT "
+            f"the checkpointed one. Per-product: "
+            f"{ {k: round(float(v), 3) for k, v in restored_chi2.items()} }",
+            flush=True,
+        )
     return model, history
 
 
