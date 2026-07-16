@@ -26,6 +26,34 @@ from astropy import units as u
 from ehtim.imaging.imager_utils import chisqdata
 from skimage.transform import resize
 
+#: ehtim's ``observe`` seeds with ``if seed: np.random.seed(seed)``, so a FALSY seed
+#: silently disables seeding and the thermal noise becomes irreproducible. ``seed=0``
+#: is falsy -- and 0 is the most natural default a caller will pass (ehtim's own
+#: docstring says "DO NOT set to 0!", which is easy to miss). Every dataset generated
+#: here with ``--seed 0`` was therefore a fresh, unrepeatable noise draw, which
+#: silently confounds any comparison between runs that regenerate their data.
+#:
+#: Offsetting into a guaranteed-nonzero range makes every seed -- including 0 --
+#: reproducible, while keeping distinct seeds distinct.
+_EHTIM_SEED_OFFSET = 1_000_003  # prime; keeps distinct seeds distinct
+
+
+def _ehtim_seed(seed: int) -> int:
+    """Map a user seed to a nonzero seed ehtim will actually honour.
+
+    Parameters
+    ----------
+    seed : int
+        User-facing seed; ``0`` is allowed and is the common default.
+
+    Returns
+    -------
+    int
+        A strictly positive seed. ehtim skips seeding entirely for falsy values, so
+        this must never return 0.
+    """
+    return int(seed) + _EHTIM_SEED_OFFSET
+
 
 @dataclass
 class Config:
@@ -746,7 +774,7 @@ def generate_polarized_dataset(
         add_th_noise=True,
         ampcal=ampcal,
         phasecal=phasecal,
-        seed=seed,
+        seed=_ehtim_seed(seed),
         verbose=False,
     )
     if fractional_noise:
