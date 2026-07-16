@@ -215,6 +215,8 @@ def polarized_train_step(
     frame_max,
     frame_min,
     *,
+    bl_station_ids=None,
+    frame_indices=None,
     freeze_intensity: bool = False,
     pol_scale=1.0,
     basis: str = "stokes",
@@ -274,6 +276,8 @@ def polarized_train_step(
             pol_support_tau=pol_support_tau,
             pol_l1_weight=pol_l1_weight,
             dyn_compact_weight=dyn_compact_weight,
+            bl_station_ids=bl_station_ids,
+            frame_indices=frame_indices,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
@@ -327,7 +331,7 @@ def polarized_train_epoch(
         ``mean_chi2`` is a dict keyed like the data (Stokes or product);
         ``mean_grad_norm`` is the mean global gradient norm over the epoch.
     """
-    pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b = epoch_data
+    pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b, bl_b, fidx_b = epoch_data
     keys = tuple(tgt_b.keys())
 
     def scan_fn(carry, i):
@@ -346,6 +350,8 @@ def polarized_train_epoch(
             optimizer,
             frame_max,
             frame_min,
+            bl_station_ids=None if bl_b is None else bl_b[i],
+            frame_indices=None if fidx_b is None else fidx_b[i],
             freeze_intensity=freeze_intensity,
             pol_scale=pol_scale,
             basis=basis,
@@ -375,7 +381,20 @@ def polarized_train_epoch(
 
 @eqx.filter_jit
 def _eval_chi2_full(
-    model, xy, times, a, targets, sigmas, masks, frame_max, frame_min, *, basis, products
+    model,
+    xy,
+    times,
+    a,
+    targets,
+    sigmas,
+    masks,
+    frame_max,
+    frame_min,
+    *,
+    basis,
+    products,
+    bl_station_ids=None,
+    frame_indices=None,
 ):
     """True per-product chi-squared of ``model`` on the full dataset.
 
@@ -425,6 +444,10 @@ def _eval_chi2_full(
         neg_weight=0.0,
         w_sparse_weight=0.0,
         b_sparse_weight=0.0,
+        # the gains ride on the model, so the EVAL chi2 must apply them too --
+        # this is the number that drives best-checkpoint selection and early stop
+        bl_station_ids=bl_station_ids,
+        frame_indices=frame_indices,
     )
     return aux["chi2_vis"]
 
@@ -513,6 +536,10 @@ def train_polarized_model(
     xy_eval = jnp.asarray(loader.pixel_coords)
     t_eval = jnp.asarray(loader.times)
     a_eval = jnp.asarray(loader.op.A)
+    bl_eval = (
+        jnp.asarray(loader.op.bl_station_ids) if loader.op.bl_station_ids is not None else None
+    )
+    fidx_eval = jnp.arange(len(loader.times))
     tgt_eval = {k: jnp.asarray(loader.op.targets[k]) for k in hist_keys}
     sig_eval = {k: jnp.asarray(loader.op.sigmas[k]) for k in hist_keys}
     msk_eval = {k: jnp.asarray(loader.op.masks[k]) for k in hist_keys}
@@ -578,6 +605,8 @@ def train_polarized_model(
                 frame_min,
                 basis=basis,
                 products=products,
+                bl_station_ids=bl_eval,
+                frame_indices=fidx_eval,
             )
             eval_chi2 = {k: float(eval_chi2[k]) for k in hist_keys}
             history["total"].append(float(loss))
@@ -636,6 +665,8 @@ def train_polarized_model(
         frame_min,
         basis=basis,
         products=products,
+        bl_station_ids=bl_eval,
+        frame_indices=fidx_eval,
     )
     restored_max = float(max(float(v) for v in restored_chi2.values()))
     print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}", flush=True)

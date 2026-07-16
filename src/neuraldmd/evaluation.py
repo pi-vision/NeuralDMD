@@ -382,6 +382,141 @@ def beta2_coefficient(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
     return complex(((q + 1j * u)[ann] * np.exp(2j * phi[ann])).sum() / den)
 
 
+def polarized_dynamics_nrmse(recon, truth):
+    """NRMSE of the TIME-VARYING part of Q and U (each cube minus its own time mean).
+
+    Global ``beta2`` cannot see polarization that is localized rather than spread
+    around the ring. In ``mring+hs-pol`` the polarized signal rides on a compact
+    orbiting spot while a static radial-EVPA ring dominates the annulus integral, so
+    the truth's global beta2 phase swings only ~1 deg and both ``beta2_amp_ratio``
+    and ``phase_corr`` are measuring the static ring, not the thing under test.
+
+    Removing each cube's time mean cancels the static polarization and leaves exactly
+    the moving part, which is what a dynamic-pol model is claiming to recover. It is
+    also meaningful for a static-pol truth: there the truth's dynamic Q,U is ~0, so a
+    large value flags polarization variability the reconstruction INVENTED.
+
+    Parameters
+    ----------
+    recon, truth : dict of str -> array_like
+        ``{"I","Q","U"}`` cubes, each ``(T, H, W)``.
+
+    Returns
+    -------
+    dict
+        ``nrmse_Q_dyn``/``nrmse_U_dyn`` -- ||recon_dyn - truth_dyn|| / ||truth_dyn||
+        (nan when the truth carries no dynamic pol at all); ``truth_dyn_power_Q``/
+        ``truth_dyn_power_U`` -- the truth's dynamic norm, so a vacuous test is
+        visible; ``recon_dyn_power_Q``/``recon_dyn_power_U`` -- the recon's, which
+        exposes invented dynamics against a static truth.
+    """
+    out = {}
+    for s_ in ("Q", "U"):
+        r, t = np.asarray(recon[s_]), np.asarray(truth[s_])
+        n = min(len(r), len(t))
+        r, t = r[:n], t[:n]
+        r_dyn, t_dyn = r - r.mean(0), t - t.mean(0)
+        tp, rp = float(np.linalg.norm(t_dyn)), float(np.linalg.norm(r_dyn))
+        # Guard RELATIVE to the truth's total power, not by an absolute floor: a
+        # static-pol truth still carries ~1e-7 of numerical dynamic power, and
+        # dividing by that gives a meaningless ~3e5. Where the truth has no dynamic
+        # polarization the ratio is undefined -- report nan and let
+        # recon_dyn_power speak instead (that is what exposes INVENTED variability).
+        scale = float(np.linalg.norm(t))
+        out[f"nrmse_{s_}_dyn"] = (
+            float(np.linalg.norm(r_dyn - t_dyn) / tp)
+            if tp > 1e-3 * max(scale, 1e-12)
+            else float("nan")
+        )
+        out[f"truth_dyn_power_{s_}"] = tp
+        out[f"recon_dyn_power_{s_}"] = rp
+    return out
+
+
+def beta2_series(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """Per-frame complex ``beta2``, i.e. ``beta2(t)`` -- the time-resolved swirl.
+
+    :func:`beta2_coefficient` averages the cubes over time before projecting, which
+    is right for a STATIC EVPA but destroys a rotating one: if the swirl's
+    orientation turns through 2*pi over the window, the time-averaged Q+iU cancels
+    and ``|beta2|`` collapses toward 0 even for a perfect reconstruction. Models
+    whose polarization is dynamic (e.g. a rotating EVPA / varying beta2) must be
+    scored frame by frame with this instead.
+
+    Parameters
+    ----------
+    q, u, i : array_like
+        ``(T, H, W)`` Stokes cubes.
+    fov_uas : float
+        Field of view [uas].
+    rmin_uas, rmax_uas : float
+        Annulus bounds [uas].
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(T,)`` complex ``beta2`` per frame.
+    """
+    q, u, i = np.asarray(q), np.asarray(u), np.asarray(i)
+    if q.ndim != 3:
+        raise ValueError(f"beta2_series needs (T, H, W) cubes, got {q.shape}")
+    h, w = i.shape[-2:]
+    yy, xx = np.mgrid[0:h, 0:w]
+    rho = np.hypot(xx - (w - 1) / 2, yy - (h - 1) / 2) * (fov_uas / w)
+    phi = np.arctan2(yy - (h - 1) / 2, xx - (w - 1) / 2)
+    ann = (rho > rmin_uas) & (rho < rmax_uas)
+    phase = np.exp(2j * phi[ann])
+    den = i[:, ann].sum(axis=1)
+    num = ((q[:, ann] + 1j * u[:, ann]) * phase[None, :]).sum(axis=1)
+    return np.where(den == 0, 0.0 + 0.0j, num / np.where(den == 0, 1.0, den))
+
+
+def beta2_dynamics_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """Track ``beta2(t)``: does the reconstruction follow a *rotating* swirl?
+
+    For a model with dynamic polarization the question is not whether the mean swirl
+    is right but whether its orientation follows the truth frame by frame.
+
+    Returns
+    -------
+    dict
+        ``amp_ratio``  -- mean |beta2| ratio (recon/truth) over frames;
+        ``phase_rmse_deg`` -- RMS of the wrapped per-frame phase error;
+        ``phase_corr`` -- correlation of the unwrapped phase tracks (1 = perfect
+        tracking of the rotation, ~0 = no tracking);
+        ``truth_phase_swing_deg`` -- how far the truth's phase actually turns over
+        the window (a static truth swings ~0 and makes the tracking test vacuous);
+        ``amp_ratio_timeavg`` -- what the time-AVERAGED beta2 would report, for
+        comparison: it collapses toward 0 for a rotating swirl.
+    """
+    bt = beta2_series(truth["Q"], truth["U"], truth["I"], fov_uas, rmin_uas, rmax_uas)
+    br = beta2_series(recon["Q"], recon["U"], recon["I"], fov_uas, rmin_uas, rmax_uas)
+    n = min(len(bt), len(br))
+    bt, br = bt[:n], br[:n]
+
+    amp_ratio = float(np.mean(np.abs(br)) / (np.mean(np.abs(bt)) + 1e-12))
+    dphi = np.degrees(np.angle(br) - np.angle(bt))
+    dphi = (dphi + 180.0) % 360.0 - 180.0
+    phase_rmse = float(np.sqrt(np.mean(dphi**2)))
+
+    pt, pr = np.unwrap(np.angle(bt)), np.unwrap(np.angle(br))
+    if np.std(pt) < 1e-9 or np.std(pr) < 1e-9:
+        corr = float("nan")  # a static track has no rotation to correlate against
+    else:
+        corr = float(np.corrcoef(pt, pr)[0, 1])
+    swing = float(np.degrees(pt.max() - pt.min()))
+
+    at = abs(beta2_coefficient(truth["Q"], truth["U"], truth["I"], fov_uas, rmin_uas, rmax_uas))
+    ar = abs(beta2_coefficient(recon["Q"], recon["U"], recon["I"], fov_uas, rmin_uas, rmax_uas))
+    return {
+        "amp_ratio": amp_ratio,
+        "phase_rmse_deg": phase_rmse,
+        "phase_corr": corr,
+        "truth_phase_swing_deg": swing,
+        "amp_ratio_timeavg": float(ar / (at + 1e-12)),
+    }
+
+
 def beta2_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
     """``(|beta2|_recon/|beta2|_truth, angle(beta2) error [deg])`` for the m=2 mode.
 

@@ -46,6 +46,55 @@ def parse_args():
         help="cap on temporal mode frequency (x t_scale=200 rad over the window); set "
         "below the scan Nyquist to prevent inter-scan flux ringing",
     )
+    ap.add_argument(
+        "--truth-model",
+        default="mring_hs",
+        choices=["mring_hs", "mring_hs_pol", "varbeta2"],
+        help="synthetic truth: 'mring_hs' (static spiral EVPA + unpolarized orbiting "
+        "hot spot; dynamic I), 'mring_hs_pol' (weakly-polarized ring + a POLARIZED "
+        "orbiting hot spot; dynamic I AND pol), or 'varbeta2' (rotating EVPA on a "
+        "static ring; dynamic pol only). Use --direction CCW with mring_hs to get "
+        "the direction-bias variant",
+    )
+    ap.add_argument(
+        "--direction",
+        default="CW",
+        choices=["CW", "CCW"],
+        help="hot-spot orbital sense for 'mring_hs'/'mring_hs_pol' (CCW is the "
+        "direction-bias variant, ehteval's mring+hsCCW)",
+    )
+    # ── station gains (M3) ── off by default: M2 data are gain-free by construction
+    ap.add_argument(
+        "--fit-gains",
+        action="store_true",
+        help="solve per-station complex gains (amp + phase) alongside the sky. RIME "
+        "is applied to the MODEL visibilities: V_pq <- g_p V_pq conj(g_q). Requires a "
+        "dataset carrying bl_station_ids",
+    )
+    ap.add_argument(
+        "--gain-hands",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="2 = separate R and L gains (per-hand, the physical case); 1 ties them",
+    )
+    ap.add_argument(
+        "--gain-amp-bounds",
+        type=float,
+        nargs=2,
+        default=(0.5, 2.0),
+        metavar=("LO", "HI"),
+        help="hard sigmoid bounds on gain amplitude; must strictly bracket 1. The "
+        "default (0.9, 1.1) of StationGains is far too tight for real corruption "
+        "(on-sky fits land near 0.7-0.9) and would silently rail",
+    )
+    ap.add_argument(
+        "--gain-phase",
+        action="store_true",
+        help="also solve gain PHASES (complex gains). Phases are referenced to "
+        "--gain-ref-station, since a global phase offset is degenerate with source position",
+    )
+    ap.add_argument("--gain-ref-station", type=int, default=0, help="phase reference station")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reuse-data", action="store_true", help="Reuse an existing data/ obs_dir")
     # external observation mode: fit a provided uvfits (e.g. the on-sky synthetic
@@ -265,6 +314,8 @@ def main():
             stokes=stokes,
             basis=args.basis,
             seed=args.seed,
+            truth_model=args.truth_model,
+            direction=args.direction,
         )
     print(f"Dataset keys={op.stokes}  A={op.A.shape}", flush=True)
 
@@ -304,6 +355,32 @@ def main():
         num_frequencies=args.frequencies,
         theta_max=args.theta_max,
     )
+
+    if args.fit_gains:
+        # Attach the gain table to the sky model: it becomes part of the same pytree,
+        # so the optimizer solves calibration and image together. Needs station ids
+        # (any dataset from load_uvfits_to_products has them).
+        from neuraldmd.calibration import StationGains
+        from neuraldmd.polarized import with_gains
+
+        if op.bl_station_ids is None:
+            raise SystemExit("--fit-gains needs a dataset with bl_station_ids")
+        n_st = len(op.stations) if op.stations else int(op.bl_station_ids.max()) + 1
+        gains = StationGains(
+            n_stations=n_st,
+            n_times=int(op.A.shape[0]),
+            n_hands=args.gain_hands,
+            use_phase=args.gain_phase,
+            amp_bounds=tuple(args.gain_amp_bounds),
+            ref_station=args.gain_ref_station,
+        )
+        model = with_gains(model, gains)
+        print(
+            f"Fitting station gains: {n_st} stations x {op.A.shape[0]} times, "
+            f"{args.gain_hands} hand(s){' + phase' if args.gain_phase else ' (amplitude only)'}, "
+            f"amp bounds {tuple(args.gain_amp_bounds)}",
+            flush=True,
+        )
 
     if not args.no_pretrain:
         # expm_full parameterizes s = log I, so the disk template must be fit in
@@ -457,6 +534,33 @@ def main():
     beta2_truth_abs = abs(
         ev.beta2_coefficient(truth_cubes["Q"], truth_cubes["U"], truth_cubes["I"], args.fov_uas)
     )
+    # beta2 DYNAMICS: does the recon track a *rotating* swirl frame by frame? The
+    # time-averaged beta2 above cancels a rotating EVPA (it reports ~0.01 for a
+    # perfect varbeta2 fit), so a dynamic-pol truth must be scored per frame.
+    # Recovered station gains. Reported per station/hand so M3's amplitude RMSE is
+    # measurable, and so a NEGATIVE CONTROL is visible: fitting gain-free data must
+    # leave these at ~1. NB a global amplitude is degenerate with source flux (the
+    # --flux anchor breaks it) and a global phase with source position (broken by
+    # referencing to --gain-ref-station).
+    gain_report = None
+    if args.fit_gains and getattr(model, "gains", None) is not None:
+        _amp = np.asarray(model.gains.amplitudes())  # (n_st, n_t, n_hands)
+        _ph = np.degrees(np.asarray(model.gains.phases()))
+        gain_report = {
+            "n_stations": int(_amp.shape[0]),
+            "n_hands": int(_amp.shape[2]),
+            "phase_solved": bool(args.gain_phase),
+            "amp_mean_per_station": [[float(x) for x in row] for row in _amp.mean(axis=1)],
+            "amp_median": float(np.median(_amp)),
+            "amp_min": float(_amp.min()),
+            "amp_max": float(_amp.max()),
+            "amp_rms_dev_from_1": float(np.sqrt(np.mean((_amp - 1.0) ** 2))),
+            "phase_rms_deg": float(np.sqrt(np.mean(_ph**2))),
+            "stations": list(op.stations) if op.stations else None,
+        }
+        print(f"[gains] recovered: {json.dumps(gain_report)}", flush=True)
+
+    beta2_dyn = ev.beta2_dynamics_error(recon, truth_cubes, args.fov_uas)
     beta2_recon_abs = abs(ev.beta2_coefficient(recon["Q"], recon["U"], recon["I"], args.fov_uas))
     # beam-restored metrics: the data only constrain structure to ~the array
     # resolution, so also compare after blurring both cubes to a common beam
@@ -567,6 +671,8 @@ def main():
         "nrmse_blurred": nrmse_b,
         "evpa_error_deg_blurred": evpa_err_b,
         "beta2_truth_abs": float(beta2_truth_abs),
+        "gains": gain_report,
+        "beta2_dynamics": beta2_dyn,
         "beta2_recon_abs": float(beta2_recon_abs),
         "gate": {
             # [0.4, 2]: the achievable floor here is ~0.42, not 1.0 -- generation

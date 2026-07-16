@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from .calibration import PRODUCT_HANDS
 from .physics.stokes import stokes_to_products_matrix
 
 
@@ -132,6 +133,8 @@ def polarized_loss_fn(
     pol_support_tau: float = 0.05,
     pol_l1_weight: float = 0.0,
     dyn_compact_weight: float = 0.0,
+    bl_station_ids=None,
+    frame_indices=None,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
@@ -229,6 +232,10 @@ def polarized_loss_fn(
         "flux_penalty": value, "basis": basis}`` -- ``chi2_vis`` keyed by Stokes
         or product per ``basis``.
     """
+    # Gains live ON the model (an optional eqx sub-module, like `circ`), so grads
+    # flow into them through the same pytree as the sky -- no separate optimizer
+    # state, no change to the train-step signature. None => gains are not fitted.
+    gains = getattr(model, "gains", None)
     images, modes = model.stokes_fields(xy, time_indices, frame_max, frame_min)
     vis_stokes = {
         s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64)) for s in model.stokes
@@ -251,6 +258,18 @@ def polarized_loss_fn(
         chi2 = {}
         for i, p in enumerate(products):
             vis_p = sum(m_mat[i, j] * vis_stokes[s] for j, s in enumerate(model.stokes))
+            if gains is not None:
+                # RIME on the MODEL side: V_pq <- g_{h0,p} V_pq conj(g_{h1,q}).
+                # Applied to the model, never divided into the data -- equivalent for
+                # pure gains but the only correct order once D-terms enter.
+                # PRODUCT_HANDS picks the per-hand gain (RR->(0,0), RL->(0,1), ...),
+                # so R and L are solved separately when the table has n_hands=2.
+                vis_p = gains.apply(
+                    vis_p,
+                    bl_station_ids,
+                    hands=PRODUCT_HANDS[p],
+                    time_indices=frame_indices,
+                )
             chi2[p] = _vis_chi2(vis_p, targets[p], sigmas[p], masks[p])
     else:
         raise ValueError(f"basis must be 'stokes' or 'circular', got {basis!r}")

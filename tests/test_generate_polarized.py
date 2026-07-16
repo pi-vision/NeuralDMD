@@ -35,7 +35,7 @@ def test_generate_stokes_dataset(tmp_path):
     back = ObsProducts.from_obs_dir(tmp_path)
     assert back.stokes == ("I", "Q", "U")
     loader = PolarizedDMDDataLoader(op, npix=16, batch_size=2, epochs=2)
-    _, a_b, tgt, _, _, _ = loader.get_epoch_data(0)
+    _, a_b, tgt, _, _, _, _, _ = loader.get_epoch_data(0)
     assert set(tgt) == {"I", "Q", "U"}
     assert a_b.shape[-1] == 256
 
