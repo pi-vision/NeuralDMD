@@ -16,34 +16,37 @@ and cross-run comparisons silently mixed the effect under test with realization 
 import numpy as np
 import pytest
 
-from neuraldmd.data.generation import _EHTIM_SEED_OFFSET, _ehtim_seed
+# from .seeding, NOT .generation: generation imports ehtim at module scope, which is
+# absent in the fast CI lanes ("not ehtim"). Importing it here would fail COLLECTION
+# and take the whole lane down, not just skip these tests.
+from neuraldmd.data.seeding import EHTIM_SEED_OFFSET, ehtim_seed
 
 
 def test_ehtim_seed_is_never_falsy():
     """The whole bug: a falsy seed silently disables seeding in ehtim."""
     for s in (0, 1, 7, 42):
-        assert _ehtim_seed(s), f"seed {s} maps to a falsy value -- ehtim would not seed"
-        assert _ehtim_seed(s) > 0
+        assert ehtim_seed(s), f"seed {s} maps to a falsy value -- ehtim would not seed"
+        assert ehtim_seed(s) > 0
 
 
 def test_ehtim_seed_keeps_distinct_seeds_distinct():
     """Different user seeds must still give different data; the offset must not collapse
     them onto one value."""
-    mapped = [_ehtim_seed(s) for s in range(16)]
+    mapped = [ehtim_seed(s) for s in range(16)]
     assert len(set(mapped)) == 16
 
 
 def test_ehtim_seed_is_a_pure_offset():
     """Documents the mapping so a future reader can reproduce an old dataset."""
-    assert _ehtim_seed(0) == _EHTIM_SEED_OFFSET
-    assert _ehtim_seed(5) == _EHTIM_SEED_OFFSET + 5
+    assert ehtim_seed(0) == EHTIM_SEED_OFFSET
+    assert ehtim_seed(5) == EHTIM_SEED_OFFSET + 5
 
 
 def test_zero_is_the_dangerous_case_and_is_handled():
     """seed=0 is the default in our SLURM template and the natural default anywhere.
     It MUST survive the mapping as a usable, nonzero, reproducible seed."""
     assert bool(0) is False  # this is why the original code silently did nothing
-    assert bool(_ehtim_seed(0)) is True
+    assert bool(ehtim_seed(0)) is True
 
 
 @pytest.mark.slow
@@ -55,6 +58,7 @@ def test_generation_is_reproducible_in_process():
     import hashlib
     import tempfile
 
+    pytest.importorskip("ehtim")
     from neuraldmd.data.generation import generate_polarized_dataset
 
     kw = dict(
