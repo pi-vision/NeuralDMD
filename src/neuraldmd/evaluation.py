@@ -339,6 +339,45 @@ def evpa_error_deg(recon, truth, frac_thresh: float = 0.5):
     return float(np.degrees(np.median(np.abs(diff))))
 
 
+def beta2_coefficient(q, u, i, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """Complex m=2 azimuthal coefficient of the linear polarization (Palumbo 2020).
+
+    ``beta2 = sum_annulus (Q + iU) e^{+2i phi} / sum_annulus I`` over the annulus
+    ``rmin_uas .. rmax_uas``. Its phase is the dominant EVPA-swirl orientation and
+    its magnitude the m=2 polarized fraction -- the EHT-standard global EVPA
+    descriptor. The ``+2i phi`` sign selects the mode an azimuthally-winding
+    ("spiral") EVPA populates (matches the nonzero mode of ``ehtim.betamodes``);
+    the opposite sign returns the empty conjugate mode. Time axis is averaged.
+    """
+    q, u, i = np.asarray(q), np.asarray(u), np.asarray(i)
+    if q.ndim == 3:
+        q, u, i = q.mean(0), u.mean(0), i.mean(0)
+    h, w = i.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    rho = np.hypot(xx - (w - 1) / 2, yy - (h - 1) / 2) * (fov_uas / w)
+    phi = np.arctan2(yy - (h - 1) / 2, xx - (w - 1) / 2)
+    ann = (rho > rmin_uas) & (rho < rmax_uas)
+    den = i[ann].sum()
+    if den == 0:
+        return 0.0 + 0.0j
+    return complex(((q + 1j * u)[ann] * np.exp(2j * phi[ann])).sum() / den)
+
+
+def beta2_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
+    """``(|beta2|_recon/|beta2|_truth, angle(beta2) error [deg])`` for the m=2 mode.
+
+    The EHT/KINE-standard global EVPA metric: the amplitude ratio says how much of
+    the true m=2 polarized swirl was recovered, and the wrapped phase error gives
+    its orientation error -- both robust to the local pixel-EVPA scatter that
+    ``evpa_error_deg`` reports. ``beta2`` of the truth on this ring is ~0.18.
+    """
+    bt = beta2_coefficient(truth["Q"], truth["U"], truth["I"], fov_uas, rmin_uas, rmax_uas)
+    br = beta2_coefficient(recon["Q"], recon["U"], recon["I"], fov_uas, rmin_uas, rmax_uas)
+    amp_ratio = float(abs(br) / (abs(bt) + 1e-12))
+    dphi = float((np.degrees(np.angle(br) - np.angle(bt)) + 180) % 360 - 180)
+    return amp_ratio, dphi
+
+
 def _evpa_quiver(
     ax, intensity, q, u, fov_uas, *, cmap_bg="afmhot", vmin=0.0, vmax=None, skip=None, quiver=True
 ):

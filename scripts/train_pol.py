@@ -380,6 +380,9 @@ def main():
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
+    # global EVPA-swirl metric (EHT/KINE standard): m=2 azimuthal mode of the
+    # polarization field -- amplitude ratio recovered + phase (orientation) error
+    beta2_amp_ratio, beta2_phase_err = ev.beta2_error(recon, truth_cubes, args.fov_uas)
     # beam-restored metrics: the data only constrain structure to ~the array
     # resolution, so also compare after blurring both cubes to a common beam
     recon_b = ev.blur_polarized_cubes(recon, args.blur_uas, args.fov_uas)
@@ -460,6 +463,8 @@ def main():
         "final_chi2": final_chi2,
         "nrmse": nrmse,
         "evpa_error_deg": evpa_err,
+        "beta2_amp_ratio": beta2_amp_ratio,
+        "beta2_phase_err_deg": beta2_phase_err,
         "blur_uas": args.blur_uas,
         "nrmse_blurred": nrmse_b,
         "evpa_error_deg_blurred": evpa_err_b,
@@ -467,6 +472,9 @@ def main():
             "chi2_in_0.8_1.2": all(0.8 <= v <= 1.2 for v in final_chi2.values()),
             "nrmse_QU_le_0.15": (nrmse["Q"] <= 0.15 and nrmse["U"] <= 0.15),
             "evpa_le_10deg": bool(evpa_err <= 10.0),
+            # global-swirl gate: recover >=70% of the m=2 amplitude with <=20 deg
+            # orientation error (the EHT/KINE-style "structure recovered" bar)
+            "beta2_recovered": bool(beta2_amp_ratio >= 0.7 and abs(beta2_phase_err) <= 20.0),
             "nrmse_QU_blurred_le_0.15": (nrmse_b["Q"] <= 0.15 and nrmse_b["U"] <= 0.15),
             "evpa_blurred_le_10deg": bool(evpa_err_b <= 10.0),
         },
