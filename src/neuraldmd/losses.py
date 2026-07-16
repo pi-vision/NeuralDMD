@@ -126,6 +126,7 @@ def polarized_loss_fn(
     p_le_i_weight: float = 0.0,
     flux_target: float | None = None,
     flux_weight: float = 1.0,
+    compact_weight: float = 0.0,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
@@ -184,6 +185,10 @@ def polarized_loss_fn(
         disables (default).
     flux_weight : float
         Weight of the total-flux anchor.
+    compact_weight : float
+        Weight of the compactness prior -- the flux-weighted mean squared radius
+        (source size) of Stokes I. Suppresses off-source haze that the short
+        baselines cannot constrain. ``0`` disables (default).
 
     Returns
     -------
@@ -237,11 +242,28 @@ def polarized_loss_fn(
     else:
         flux_penalty = jnp.asarray(0.0)
 
+    if compact_weight:
+        # compactness prior: the flux-weighted mean squared radius (i.e. the
+        # source size), penalized per frame. Off-source haze (large radius)
+        # lives in the short-baseline null space and is not otherwise
+        # constrained; minimizing the source size suppresses it while barely
+        # moving the central emission. Scale-invariant (normalized by the flux),
+        # so the weight is independent of the intensity units. ``xy`` are the
+        # (network) pixel coordinates.
+        r2 = xy[:, 0] ** 2 + xy[:, 1] ** 2
+        r2 = (r2 / (jnp.mean(r2) + 1e-12))[:, None]  # (P, 1), ~O(1)
+        pos_i = jax.nn.relu(images["I"])  # (P, T)
+        size2 = jnp.sum(pos_i * r2, axis=0) / (jnp.sum(pos_i, axis=0) + 1e-8)  # (T,)
+        compact_penalty = jnp.mean(size2)
+    else:
+        compact_penalty = jnp.asarray(0.0)
+
     total = (
         sum(chi2.values())
         + neg_weight * neg_i
         + p_le_i_weight * p_penalty
         + flux_weight * flux_penalty
+        + compact_weight * compact_penalty
         + sparse_total
     )
     return total, {
@@ -249,5 +271,6 @@ def polarized_loss_fn(
         "neg_I": neg_i,
         "p_penalty": p_penalty,
         "flux_penalty": flux_penalty,
+        "compact_penalty": compact_penalty,
         "basis": basis,
     }

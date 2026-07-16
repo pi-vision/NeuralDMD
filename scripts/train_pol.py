@@ -128,6 +128,13 @@ def parse_args():
         "--flux", type=float, default=None, help="known total flux [Jy] (anchor off=None)"
     )
     ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
+    ap.add_argument(
+        "--compact-weight",
+        type=float,
+        default=0.0,
+        help="compactness prior weight: penalize I flux by squared radius (kills "
+        "off-source haze the data cannot constrain)",
+    )
     # evaluation: also report metrics after restoring both cubes to this beam
     ap.add_argument("--blur-uas", type=float, default=15.0, help="metric beam FWHM [uas]")
     ap.add_argument(
@@ -259,6 +266,7 @@ def main():
         lr_decay_steps=args.lr_decay_steps,
         flux_target=args.flux,
         flux_weight=args.flux_weight,
+        compact_weight=args.compact_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,
     )
