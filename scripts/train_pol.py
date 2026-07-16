@@ -193,7 +193,7 @@ def main():
     from neuraldmd.data.movies import save_movie_hdf5, to_ehtim_movie
     from neuraldmd.data.observations import ObsProducts
     from neuraldmd.polarized import PolarizedNeuralDMD
-    from neuraldmd.pretraining import pretrain_stokes_i
+    from neuraldmd.pretraining import pretrain_log_intensity, pretrain_stokes_i
     from neuraldmd.training import train_polarized_model
 
     print("jax devices:", jax.devices(), flush=True)
@@ -285,15 +285,28 @@ def main():
     )
 
     if not args.no_pretrain:
-        print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
-        model, _ = pretrain_stokes_i(
-            model,
-            truth_cubes["I"],
-            num_steps=args.pretrain_steps,
-            lr=args.pretrain_lr,
-            radius_scale=args.pretrain_radius,
-            key=jax.random.PRNGKey(args.seed + 2),
-        )
+        # expm_full parameterizes s = log I, so the disk template must be fit in
+        # log space (e^s ~ disk); the linear pretrain would leave e^0=1 background.
+        if args.pol_param == "expm_full":
+            print(f"Pretraining LOG-I disk template ({args.pretrain_steps} steps) ...", flush=True)
+            model, _ = pretrain_log_intensity(
+                model,
+                truth_cubes["I"],
+                num_steps=args.pretrain_steps,
+                lr=max(args.pretrain_lr, 1e-3),
+                radius_scale=args.pretrain_radius,
+                key=jax.random.PRNGKey(args.seed + 2),
+            )
+        else:
+            print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
+            model, _ = pretrain_stokes_i(
+                model,
+                truth_cubes["I"],
+                num_steps=args.pretrain_steps,
+                lr=args.pretrain_lr,
+                radius_scale=args.pretrain_radius,
+                key=jax.random.PRNGKey(args.seed + 2),
+            )
 
     common = dict(
         models_dir=str(out / "models"),

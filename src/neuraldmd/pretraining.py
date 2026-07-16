@@ -25,6 +25,7 @@ import numpy as np
 import optax
 from tqdm import tqdm
 
+from .model import physical_intensities
 from .zernike import build_zernike_targets
 
 
@@ -181,6 +182,84 @@ def pretrain_stokes_i(
     )
     trained_i, losses = pretrain_model(model_i, xy, z_targets, num_steps=num_steps, lr=lr, key=key)
     return polarized_model.replace_i_submodel(trained_i), losses
+
+
+def pretrain_log_intensity(
+    polarized_model,
+    truth_i,
+    fov=np.pi,
+    num_steps=2000,
+    lr=1e-3,
+    radius_scale=1.5,
+    floor=1e-3,
+    max_n=8,
+    key=None,
+):
+    """Log-space disk-template pretrain for an ``expm_full`` ``PolarizedNeuralDMD``.
+
+    For ``pol_param="expm_full"`` the intensity sub-model is ``s = log I`` (total
+    intensity ``I = e^s cosh(p)``). The standard :func:`pretrain_stokes_i` targets a
+    *linear* disk (~0 outside the source), which in log space would leave ``e^0 = 1``
+    full-brightness background flux everywhere. Instead we fit ``s`` directly, in
+    image space, to ``log(disk + floor)`` so that ``e^s ~ disk`` (small outside).
+    The disk radius is estimated from ``truth_i`` exactly as in the linear pretrain.
+
+    Parameters
+    ----------
+    polarized_model : PolarizedNeuralDMD
+        Model whose ``"I"`` (log-intensity) sub-model is pretrained.
+    truth_i : numpy.ndarray
+        ``(T, H, W)`` Stokes-I reference (for the size estimate only).
+    fov, num_steps, lr, radius_scale, max_n : hyperparameters (mirror
+        :func:`pretrain_stokes_i`).
+    floor : float
+        Outside-disk intensity; the log target is ``log(floor)`` there (``1e-3`` ->
+        about ``-6.9``, i.e. ``e^s ~ 0.1%`` of the disk value off-source).
+    key : jax.Array or None
+        Unused (kept for signature parity); the log target is defined on the fixed
+        pixel grid.
+
+    Returns
+    -------
+    model : PolarizedNeuralDMD
+        A copy with the pretrained log-intensity sub-model.
+    losses : list of float
+        Image-space MSE history.
+    """
+    model_i = polarized_model.i_submodel
+    _, height, width = np.asarray(truth_i).shape
+    r_g, _ = radius_of_gyration(truth_i, fov_x=fov, fov_y=fov)
+    _z, _picked, mask, xy = build_zernike_targets(
+        height, width, radius_scale * r_g, fov, fov, model_i.r + 1, max_n=max_n,
+        prefer_ms=(0, 1, 2, 3),
+    )
+    xy = jnp.asarray(xy)
+    log_target = jnp.log(jnp.asarray(mask, dtype=jnp.float32).reshape(-1) + floor)  # (P,)
+    t0 = jnp.zeros((1,), dtype=jnp.float32)
+
+    def loss_fn(m):
+        s, _ = physical_intensities(m, xy, t0, 1.0, 0.0)  # (P, 1) raw log-I field
+        return jnp.mean((s[:, 0] - log_target) ** 2)
+
+    optimizer = optax.adam(lr)
+    opt_state = optimizer.init(eqx.filter(model_i, eqx.is_array))
+
+    @eqx.filter_jit
+    def step(m, opt_state_):
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(m)
+        updates, opt_state_ = optimizer.update(grads, opt_state_, eqx.filter(m, eqx.is_array))
+        return eqx.apply_updates(m, updates), opt_state_, loss
+
+    losses = []
+    with tqdm(total=num_steps) as pbar:
+        for i in range(num_steps):
+            model_i, opt_state, loss = step(model_i, opt_state)
+            losses.append(float(loss))
+            pbar.update(1)
+            if (i + 1) % 200 == 0:
+                print(f"log-pretrain step {i + 1}/{num_steps}  mse {float(loss):.5f}", flush=True)
+
+    return polarized_model.replace_i_submodel(model_i), losses
 
 
 def save_template(model, models_dir):
