@@ -130,6 +130,7 @@ def polarized_loss_fn(
     compact_pol_weight: float = 0.0,
     pol_support_weight: float = 0.0,
     pol_support_tau: float = 0.05,
+    pol_l1_weight: float = 0.0,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
@@ -208,6 +209,15 @@ def polarized_loss_fn(
         Gate scale as a fraction of PEAK I (I is normalized to its max), so it is
         dataset-independent: pol is suppressed where ``I < ~tau * I_peak``. Smaller
         ``tau`` = harder gate (default ``0.05``).
+    pol_l1_weight : float
+        Weight of the L1 (total polarized flux) prior ``mean(sum(P))`` -- the
+        classic RML sparsity regularizer applied to P. The on-ring m=2 swirl and
+        the off-ring haze are near-degenerate in chi2 at the sampled (u,v) but not
+        in polarized flux: the ring buys the same chi2 with several times less
+        flux, so penalizing flux per se selects it. Unlike ``compact_pol_weight``
+        it does not depend on radius, and unlike ``pol_support_weight`` it has no
+        I-gate (hence no barrier from I and no path to game it via I). ``0``
+        disables (default).
 
     Returns
     -------
@@ -279,8 +289,24 @@ def polarized_loss_fn(
     else:
         compact_penalty = jnp.asarray(0.0)
 
-    if (compact_pol_weight or pol_support_weight) and pol:
+    if (compact_pol_weight or pol_support_weight or pol_l1_weight) and pol:
         p_mag = jnp.sqrt(sum(images[s] ** 2 for s in pol) + 1e-12)  # (P_pix, T)
+
+    if pol_l1_weight and pol:
+        # L1 (total polarized flux) prior -- the classic RML sparsity regularizer,
+        # applied to P rather than I. The cross-hand null space lets the model buy
+        # chi2 either with the true on-ring m=2 swirl or with a diffuse off-ring
+        # haze; the two are near-degenerate at the sampled (u,v), so chi2 alone
+        # cannot choose. They differ sharply in *flux efficiency*: the ring buys
+        # the same chi2 with several times less polarized flux than the haze, so
+        # penalizing total P per unit flux favours the ring -- unlike a radial
+        # moment (only ~2x stronger off-ring than on-ring, empirically too weak)
+        # and without the I-gate's optimization barrier. eps inside the sqrt is
+        # REQUIRED (see p_penalty above): with pol tied to I, Q,U vanish exactly
+        # where I crosses zero and an unguarded sqrt gives 0*inf = NaN.
+        pol_l1_penalty = jnp.mean(jnp.sum(p_mag, axis=0))
+    else:
+        pol_l1_penalty = jnp.asarray(0.0)
 
     if compact_pol_weight and pol:
         # polarization compactness: the SAME second moment applied to the linear
@@ -326,6 +352,7 @@ def polarized_loss_fn(
         + compact_weight * compact_penalty
         + compact_pol_weight * compact_pol_penalty
         + pol_support_weight * support_penalty
+        + pol_l1_weight * pol_l1_penalty
         + sparse_total
     )
     return total, {
@@ -336,5 +363,6 @@ def polarized_loss_fn(
         "compact_penalty": compact_penalty,
         "compact_pol_penalty": compact_pol_penalty,
         "support_penalty": support_penalty,
+        "pol_l1_penalty": pol_l1_penalty,
         "basis": basis,
     }
