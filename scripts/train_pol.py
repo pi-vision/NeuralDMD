@@ -298,7 +298,7 @@ def main():
                 key=jax.random.PRNGKey(args.seed + 2),
             )
         else:
-            print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...", flush=True)
+            print(f"Pretraining Stokes-I disk template ({args.pretrain_steps} steps) ...")
             model, _ = pretrain_stokes_i(
                 model,
                 truth_cubes["I"],
