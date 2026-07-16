@@ -205,7 +205,9 @@ class PolarizedNeuralDMD(eqx.Module):
                 p_sq = q_raw**2 + u_raw**2 + v_raw**2
             else:
                 p_sq = q_raw**2 + u_raw**2
-            p = jnp.sqrt(p_sq + 1e-12)
+            # clip p: m = tanh(p) saturates by p~5, so [0,10] spans the full
+            # physical range while keeping cosh(p)/sinh(p) from overflowing float32.
+            p = jnp.clip(jnp.sqrt(p_sq + 1e-12), 0.0, 10.0)
             base = frame_max["I"] * jnp.exp(jnp.clip(s_raw, -10.0, 10.0))
             sinh_over_p = jnp.sinh(p) / p  # smooth, -> 1 as p -> 0
             images = {"I": base * jnp.cosh(p)}
