@@ -3,6 +3,7 @@
 import os
 import warnings
 
+import equinox as eqx
 import h5py
 import imageio.v3 as iio
 import jax.numpy as jnp
@@ -247,6 +248,18 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
 # ---------------------------------------------------------------------------
 
 
+@eqx.filter_jit
+def _stokes_fields_jit(model, xy, times, frame_max, frame_min):
+    """``model.stokes_fields`` under jit -- the same path training evaluates.
+
+    Eager and jitted evaluation of ``stokes_fields`` do NOT agree: eagerly the field
+    picks up a near-uniform ~3e-3/pixel positive offset (~7.3 Jy over a 50x50 grid),
+    which is what every exported cube has been carrying. ``frame_max``/``frame_min``
+    are dicts of Python floats, so ``filter_jit`` treats them as static.
+    """
+    return model.stokes_fields(xy, times, frame_max, frame_min)
+
+
 def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=np.pi, fov_y=np.pi):
     """Reconstruct per-Stokes image cubes from a ``PolarizedNeuralDMD``.
 
@@ -271,7 +284,13 @@ def reconstruct_polarized_cubes(model, npix, times, frame_max, frame_min, fov_x=
     """
     xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
     times = jnp.asarray(np.asarray(times, dtype=np.float32))
-    images, _ = model.stokes_fields(xy, times, frame_max, frame_min)
+    # Evaluate under jit, exactly as training does. Called eagerly, `stokes_fields`
+    # returns a systematically different field: a near-uniform positive offset of
+    # ~3e-3 per pixel, i.e. ~7.3 Jy of spurious diffuse flux over a 50x50 grid
+    # (measured: eager flux/frame 9.95 vs jitted 2.63 against a truth of 2.7). That
+    # offset is the "off-source haze" -- an artifact of the eager path, not the model.
+    # Jitted, this reproduces the chi2 the training loop reports (9.565 vs 9.565).
+    images, _ = _stokes_fields_jit(model, xy, times, frame_max, frame_min)
     return {s: np.asarray(images[s]).T.reshape(len(times), npix, npix) for s in images}
 
 
