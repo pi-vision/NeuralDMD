@@ -173,6 +173,15 @@ def parse_args():
         default=0.05,
         help="support gate scale as a fraction of peak I (smaller = harder gate)",
     )
+    ap.add_argument(
+        "--pol-l1-weight",
+        type=float,
+        default=0.0,
+        help="L1 prior on total polarized flux, mean(sum(P)) -- the classic RML "
+        "sparsity regularizer on P. The on-ring m=2 swirl and the off-ring haze "
+        "are near-degenerate in chi2 but not in flux (the ring buys the same chi2 "
+        "with several times less), so this selects the ring",
+    )
     # evaluation: also report metrics after restoring both cubes to this beam
     ap.add_argument("--blur-uas", type=float, default=15.0, help="metric beam FWHM [uas]")
     ap.add_argument(
@@ -199,6 +208,9 @@ def main():
     print("jax devices:", jax.devices(), flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    # persist the exact configuration: without it a run's recipe is unrecoverable
+    # once the launching shell is gone, and comparing runs becomes archaeology
+    (out / "config.json").write_text(json.dumps(vars(args), indent=2, default=str))
     data_dir = out / "data"
     stokes = ("I", "Q", "U")
 
@@ -322,6 +334,7 @@ def main():
         compact_pol_weight=args.compact_pol_weight,
         pol_support_weight=args.pol_support_weight,
         pol_support_tau=args.pol_support_tau,
+        pol_l1_weight=args.pol_l1_weight,
         p_le_i_weight=args.p_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,
@@ -383,6 +396,13 @@ def main():
     # global EVPA-swirl metric (EHT/KINE standard): m=2 azimuthal mode of the
     # polarization field -- amplitude ratio recovered + phase (orientation) error
     beta2_amp_ratio, beta2_phase_err = ev.beta2_error(recon, truth_cubes, args.fov_uas)
+    # record both absolute |beta2| values, not just their ratio: if the truth movie
+    # carries no m=2 swirl (|beta2|~0) the ratio is a meaningless 0/0 and can read
+    # large while nothing was recovered
+    beta2_truth_abs = abs(
+        ev.beta2_coefficient(truth_cubes["Q"], truth_cubes["U"], truth_cubes["I"], args.fov_uas)
+    )
+    beta2_recon_abs = abs(ev.beta2_coefficient(recon["Q"], recon["U"], recon["I"], args.fov_uas))
     # beam-restored metrics: the data only constrain structure to ~the array
     # resolution, so also compare after blurring both cubes to a common beam
     recon_b = ev.blur_polarized_cubes(recon, args.blur_uas, args.fov_uas)
@@ -468,13 +488,19 @@ def main():
         "blur_uas": args.blur_uas,
         "nrmse_blurred": nrmse_b,
         "evpa_error_deg_blurred": evpa_err_b,
+        "beta2_truth_abs": float(beta2_truth_abs),
+        "beta2_recon_abs": float(beta2_recon_abs),
         "gate": {
             "chi2_in_0.8_1.2": all(0.8 <= v <= 1.2 for v in final_chi2.values()),
             "nrmse_QU_le_0.15": (nrmse["Q"] <= 0.15 and nrmse["U"] <= 0.15),
             "evpa_le_10deg": bool(evpa_err <= 10.0),
             # global-swirl gate: recover >=70% of the m=2 amplitude with <=20 deg
-            # orientation error (the EHT/KINE-style "structure recovered" bar)
-            "beta2_recovered": bool(beta2_amp_ratio >= 0.7 and abs(beta2_phase_err) <= 20.0),
+            # orientation error (the EHT/KINE-style "structure recovered" bar).
+            # Guarded on the truth actually carrying a swirl -- on a truth with
+            # |beta2|~0 the ratio is 0/0 and reads large for a pure-noise recon.
+            "beta2_recovered": bool(
+                beta2_truth_abs >= 0.05 and beta2_amp_ratio >= 0.7 and abs(beta2_phase_err) <= 20.0
+            ),
             "nrmse_QU_blurred_le_0.15": (nrmse_b["Q"] <= 0.15 and nrmse_b["U"] <= 0.15),
             "evpa_blurred_le_10deg": bool(evpa_err_b <= 10.0),
         },
