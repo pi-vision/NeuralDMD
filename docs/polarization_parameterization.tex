@@ -4,7 +4,8 @@
 \usepackage{hyperref}
 
 \title{Polarization parameterization for NeuralDMD:\\
-why we fit $(I,\,m_\ell,\,\xi)$ rather than free $(I,\,Q,\,U)$}
+the fractional/direct trade-off, and why we fit direct $(I,Q,U)$\\
+with explicit support priors}
 \author{Sgr\,A$^\ast$ dynamics / NeuralDMD polarization effort}
 \date{\today}
 
@@ -12,27 +13,40 @@ why we fit $(I,\,m_\ell,\,\xi)$ rather than free $(I,\,Q,\,U)$}
 \maketitle
 
 \begin{abstract}
-We record the reasoning behind modeling linear polarization in NeuralDMD as a
-\emph{fraction of Stokes~$I$} rather than as three free Stokes fields. The two
-representations describe the identical degrees of freedom; the fractional chart is
-simply the one in which the physical constraint $P\le I$ becomes a box bound (a
-single sigmoid) and in which polarization is structurally tied to the total
-intensity. This fixes an empirical failure we observed with free $(Q,U)$: the
-fit reached $\chi^2\!\approx\!1$ on the visibilities while producing unphysical
-polarization images.
+We record how NeuralDMD models linear polarization, and why the choice evolved.
+We first fit the \emph{fractional} chart $(I,m_\ell,\xi)$, in which the physical
+bounds $P\le I$ and ``no polarization without total intensity'' become a single
+box constraint. That chart is exact and physical, but we found it carries a
+\emph{hidden optimization obstruction}: the unit-normalized EVPA direction must
+wind at twice the azimuthal EVPA mode, and gradient descent does not reach the
+high-winding ($m\!\ge\!2$) configurations required by, e.g., a spiral EVPA. On a
+synthetic thick-ring truth whose true EVPA is a spiral, every fractional fit
+collapses to a near-uniform ($m\!\le\!1$) EVPA---median EVPA error $\sim\!40^\circ$
+---regardless of network capacity or training budget. We therefore fit the
+\emph{direct} chart $(I,Q,U)$, which has no winding obstruction, and re-supply the
+two constraints the fractional chart gave for free as explicit, differentiable
+priors. The key one is an \emph{intensity-gated support prior}
+$\sum_x P(x)\,e^{-I(x)/\tau}$, with $I$ entering only as a stop-gradient
+reference, which closes the off-source null-space ``haze'' a direct fit would
+otherwise exploit. Two controlled diagnostics show the target is strongly
+identified: the truth pushed through the forward operator matches the cross-hand
+\emph{data} at the noise floor, and the data prefer the true spiral EVPA over the
+best uniform EVPA by a factor $\sim\!20$ in $\chi^2$. The residual difficulty is
+thus purely the reconstruction's null space, which the support prior is designed
+to remove.
 \end{abstract}
 
 \section{The problem}
-Polarimetric VLBI inversion from sparse coverage is severely ill-posed:
-many images reproduce the handful of measured cross-hand visibilities equally
-well. If Stokes $Q$ and $U$ are modeled as \emph{free, independent} image fields,
-the reconstruction is free to place polarized flux anywhere the data permit,
-including in physically forbidden configurations. In a controlled synthetic test
-(simultaneous $I,Q,U$; circular-basis $\chi^2$) a free-$(Q,U)$ model reached
-$\chi^2_{RR,LL,RL,LR}\!\approx\!1$ yet gave normalized image errors
-$\mathrm{NRMSE}_{Q,U}>1$ (worse than a null map) and an electric-vector position
-angle (EVPA) error of $\sim\!30^\circ$. The visibilities were fit; the images were
-not physical.
+Polarimetric VLBI inversion from sparse coverage is severely ill-posed: many
+images reproduce the handful of measured cross-hand visibilities equally well.
+Two failure modes bracket the design space. A \emph{free} $(Q,U)$ model can place
+polarized flux anywhere the data permit---including off the source, where an
+extended ``haze'' fits the cross hands to the noise floor while leaving the true
+on-source structure unconstrained. A \emph{fractional} $(m_\ell,\xi)$ model is
+immune to that (its polarization is tied to $I$), but, as we show below, cannot
+represent the higher-order azimuthal EVPA structure that real ring sources carry.
+The parameterization we adopt keeps the direct chart and removes its haze with a
+prior, rather than paying the fractional chart's representational cost.
 
 \section{Physical constraints on the Stokes vector}
 At every pixel and time the Stokes vector $(I,Q,U,V)$ of physical radiation obeys
@@ -42,84 +56,144 @@ two hard constraints:
   I=0 \;&\Rightarrow\; Q=U=V=0. \label{eq:support}
 \end{align}
 Equation~\eqref{eq:ple} states that the polarized intensity cannot exceed the
-total intensity (the fractional polarization $m=P/I\in[0,1]$; a source cannot be
-more than $100\%$ polarized). Equation~\eqref{eq:support}, a corollary, forbids
-polarized flux where there is no total flux. A free-$(Q,U)$ model can violate
-both.
+total intensity ($m=P/I\in[0,1]$; a source cannot be more than $100\%$
+polarized). Equation~\eqref{eq:support}, a corollary, forbids polarized flux
+where there is no total flux. A free-$(Q,U)$ model can violate both; the
+fractional chart enforces both by construction. The design question is at what
+cost.
 
 \section{Two coordinate charts for the same degrees of freedom}
 A physical (linear) polarization state has three real degrees of freedom per
-pixel. These can be coordinatized as $(I,Q,U)$ \emph{or} as $(I,m_\ell,\xi)$,
-where $m_\ell$ is the linear polarization fraction and $\xi$ the EVPA:
+pixel, coordinatized as $(I,Q,U)$ \emph{or} as $(I,m_\ell,\xi)$, where $m_\ell$
+is the linear polarization fraction and $\xi$ the EVPA:
 \begin{equation}
   Q = m_\ell\,I\,\cos 2\xi,\qquad
   U = m_\ell\,I\,\sin 2\xi,
   \label{eq:transform}
 \end{equation}
 with inverse $m_\ell=\sqrt{Q^2+U^2}/I$ and $\xi=\tfrac12\operatorname{atan2}(U,Q)$.
-This is a change of variables, exactly like Cartesian $\leftrightarrow$ polar
-coordinates. Neither $m_\ell$ nor $\xi$ is ``independent'' of $Q,U$---both are
-functions of them---and no information is added or removed. What differs is the
-\emph{shape of the physical region}:
-\begin{itemize}
-  \item In $(I,Q,U)$ coordinates the constraint~\eqref{eq:ple} is the nonlinear
-  coupling $\sqrt{Q^2+U^2}\le I$; free fields ignore it.
-  \item In $(I,m_\ell,\xi)$ coordinates the \emph{same} constraint is the box
-  $m_\ell\in[0,1]$---enforced by one sigmoid---and $m_\ell\in[0,1]$ maps
-  \emph{exactly} onto the physical region of $(I,Q,U)$ space, no more and no less.
-  Support~\eqref{eq:support} is automatic because $Q,U\propto I$.
-\end{itemize}
-As a bonus, $m_\ell$ (fraction) and $\xi$ (angle) are the quantities that distinct
-physics controls---emission/absorption set $I$, while magnetic-field geometry and
-Faraday effects set the fraction and angle---so priors and initialization are
-natural in this chart.
+This is a change of variables; no information is added or removed. What differs is
+the shape of the physical region: in $(I,Q,U)$ the bound~\eqref{eq:ple} is the
+nonlinear coupling $\sqrt{Q^2+U^2}\le I$, which free fields ignore; in
+$(I,m_\ell,\xi)$ the \emph{same} bound is the box $m_\ell\in[0,1]$, and
+support~\eqref{eq:support} is automatic because $Q,U\propto I$.
 
-\section{The parameterization we adopt}
-Each field is the raw output of a NeuralDMD sub-model, mapped through a bounded
-activation:
-\begin{align}
-  m_\ell(x,t) &= \sigma\!\big(f_{m}(x,t) - s\big)\,\kappa,
-    &&\kappa \le 1,\ \ s=\text{outshift}, \label{eq:ml}\\
-  (\cos 2\xi,\ \sin 2\xi) &=
-    \frac{(f_{c},\ f_{s})}{\sqrt{f_{c}^2+f_{s}^2+\epsilon}},
-    &&\text{(unit EVPA direction)} \label{eq:evpa}\\
-  m_c(x,t) &= 2\big(\sigma(f_{v}-s)-\tfrac12\big),
-    &&V = m_c\,I\ \ \text{(optional)} \label{eq:mc}
-\end{align}
-with $\sigma$ the logistic sigmoid. Stokes $Q,U$ follow from~\eqref{eq:transform}.
+\section{Why the fractional chart fails: the EVPA winding obstruction}
+\label{sec:winding}
+The catch is in the angle. Polarization is a \emph{spin-2} field: the observable
+object is the direction $(\cos2\xi,\sin2\xi)$, a unit vector that advances by
+$4\pi$ (two full turns) when the EVPA $\xi$ advances by $2\pi$. The
+physically common ring EVPAs---radial ($\xi=\phi$), azimuthal ($\xi=\phi+\tfrac\pi2$),
+and spiral ($\xi=\phi+\text{const}$, our synthetic truth)---all have $\xi$
+advancing once around the ring, so the direction field
+$(\cos2\xi,\sin2\xi)$ has \textbf{winding number 2} around the ring, and the
+resulting $(Q,U)$ carry azimuthal mode $m=2$ (a four-lobe pattern).
 
-Two properties matter:
+We parameterize the EVPA direction as a normalized pair of network outputs,
+$(\cos2\xi,\sin2\xi)=(f_c,f_s)/\sqrt{f_c^2+f_s^2+\epsilon}$, precisely so that
+$P=m_\ell|I|$ holds \emph{exactly} (Sec.~\ref{sec:direct} discusses the
+alternative). But a unit field with nonzero winding around the ring forces the
+raw field $(f_c,f_s)$ to \emph{vanish} somewhere it encloses; at those zeros the
+normalized direction is singular and its gradient diverges. Gradient descent
+initialized near a low-winding (nearly constant) direction must nucleate these
+defects and cross the singular set to reach winding~2. Empirically it does not:
+on the thick-ring + spiral-EVPA truth, fractional fits converge to a
+near-uniform EVPA ($Q$ azimuthal power $\approx 96\%$ in $m\!=\!0$, versus the
+truth's $69\%$ in $m\!=\!2$), with median EVPA error $\sim\!40^\circ$. This
+persists across spatial bandwidth (EVPA network frequencies $1$--$4$), depth,
+mode count, learning-rate schedule, and staged-vs-simultaneous training, and it
+does \emph{not} improve as the cross-hand $\chi^2$ is driven down---indeed a
+lower cross-hand $\chi^2$ can coincide with a \emph{worse} EVPA. The obstruction
+is representational/topological, not a matter of under-training.
+
+\section{The parameterization we adopt: direct $(I,Q,U)$ with support priors}
+\label{sec:direct}
+We fit $Q$ and $U$ as \emph{independent signed} NeuralDMD fields in Stokes-$I$
+units,
+\begin{equation}
+  Q(x,t) = I_{\max}\,g_Q(x,t),\qquad U(x,t) = I_{\max}\,g_U(x,t),
+\end{equation}
+with $g_Q,g_U$ the raw (sign-carrying) sub-model outputs and $I$ its own field as
+before. A four-lobe ($m\!=\!2$) $Q$ is now no harder to represent than the ring
+itself: there is no angle to wind. The price is that
+constraints~\eqref{eq:ple}--\eqref{eq:support} are no longer automatic, so we
+add them back as differentiable penalties on the circular-basis $\chi^2$
+objective ($RR,LL,RL,LR$; the likelihood is never formed on $Q/I$).
+
+\paragraph{Intensity-gated support prior.} The dominant failure of a naive
+direct fit is an off-source polarized haze: the reconstruction dumps
+$P$ into the large-scale cross-hand null space (in our test, $1.2$--$1.3$~Jy of
+off-ring $P$ against a true $0.09$~Jy), fitting $RL,LR$ without ever building the
+correct on-ring structure. We suppress it with a soft realization
+of~\eqref{eq:support},
+\begin{equation}
+  \mathcal{R}_{\mathrm{supp}}
+  \;=\; \Big\langle \textstyle\sum_x P(x,t)\,
+        \exp\!\big(-\,\mathrm{sg}[\,|I(x,t)|\,]\,/\,\tau\,\overline{I}\big)\Big\rangle_t,
+  \qquad P=\sqrt{Q^2+U^2(+V^2)},
+  \label{eq:support-prior}
+\end{equation}
+which penalizes polarized flux wherever $I$ is faint, confining $P$ to the bright
+ring (both off-ring \emph{and} the dark ring-center). Two details are essential:
 \begin{enumerate}
-  \item \textbf{Strict $P\le I$.} Because the EVPA direction in~\eqref{eq:evpa} is
-  unit-normalized, $P=\sqrt{Q^2+U^2}=m_\ell\,|I|$ \emph{exactly}, so
-  $P\le\kappa\,|I|\le I$. (Modeling $\cos2\xi,\sin2\xi$ as two independent
-  bounded outputs would instead allow $P$ up to $\sqrt2\,m_\ell I$, which can
-  violate the bound; the normalization removes that loophole.)
-  \item \textbf{Small-polarization initialization.} The bias $s$ pushes $m_\ell$
-  small at initialization, so the source starts nearly unpolarized and grows
-  polarization only as the cross-hand data demand it---the natural analogue of the
-  disk-template pretraining we apply to $I$. The value of $s$ must be matched to
-  the raw-field scale: with the gauge-fixed, $O(1)$ raw fields used here,
-  $s\!\approx\!2$ gives a small but trainable $m_\ell$, whereas a large $s$
-  (e.g.\ $s\!=\!10$) saturates the sigmoid, starves its gradient, and leaves the
-  reconstruction stuck at zero polarization.
+  \item \textbf{$I$ enters only through a stop-gradient} $\mathrm{sg}[\cdot]$
+  (with $\overline I$ the peak of $|I|$, so $\tau$ is a dimensionless fraction of
+  the peak brightness). Without it, $\partial\mathcal{R}_{\mathrm{supp}}/\partial I<0$
+  and the model games the penalty by \emph{inflating} $I$ to switch the gate off,
+  which destroys the Stokes-$I$ reconstruction. With the stop-gradient the prior
+  can only push $P$ \emph{down}, never push $I$ up. (KINE avoids this implicitly
+  by freezing $I$ during polarization fitting; the stop-gradient makes the same
+  guarantee hold in a joint fit.)
+  \item It is \emph{intensity}-gated, not radius-gated. A radial second moment
+  $\sum_x P\,r^2$ also penalizes off-source pol, but it permits---indeed
+  encourages---polarization to pool in the faint ring \emph{center} (small $r$);
+  empirically it mislocates the pol inward and fails to suppress the far haze.
+  The intensity gate forbids the center too.
 \end{enumerate}
+An optional soft $P\le I$ term $\sum_x \mathrm{relu}\!\big(P-I\big)^2$
+supplies~\eqref{eq:ple} in the same spirit. Together these recover, softly, the
+confinement the fractional chart had by construction---without its winding cost.
+
+\paragraph{Initialization and staging.} $I$ retains its disk-template
+pretraining; $Q,U$ start small and grow only as the cross-hand data demand.
+Either a staged schedule (fit $I$ on $RR,LL$ first, then $Q,U$ on the frozen $I$)
+or a joint schedule with a polarization warm-up is compatible with the priors
+above; the stop-gradient in~\eqref{eq:support-prior} is what makes the joint
+(RIME-compatible) schedule safe for $I$.
+
+\section{The target is strongly identified (diagnostics)}
+Because a direct fit that still misses the EVPA invites the worry that the
+\emph{data} lack the signal, we verify the opposite on the synthetic truth:
+\begin{itemize}
+  \item \textbf{Consistency.} The saved truth $Q,U$, pushed through the exact
+  per-frame forward operator, reproduce the measured cross-hand data at the noise
+  floor ($\chi^2_{RR,LL,RL,LR}\approx0.4$); the $RL$ data carry real signal
+  ($\overline{|V|}\approx0.11$~Jy, SNR $\approx 2$). Generation is correct.
+  \item \textbf{Identifiability.} Replacing the truth's spiral EVPA with the
+  best-fit \emph{uniform} EVPA (same $P$ magnitude) raises the cross-hand $\chi^2$
+  from $\approx0.4$ to $\approx8$---a factor $\sim\!20$. The data do not merely
+  admit the $m\!=\!2$ spiral; they \emph{demand} it ($\Delta\chi^2\approx7.9$).
+\end{itemize}
+The EVPA is therefore strongly constrained; the reason a naive direct fit still
+returns a uniform EVPA is not degeneracy but the off-source haze escape route,
+which is exactly what~\eqref{eq:support-prior} closes.
 
 \section{Compatibility with ``never divide by $I$''}
-A frequent, valid objection to fractional parameterizations is the numerical
-hazard of dividing by $I$ (which can vanish). We never do: the model
-\emph{multiplies}, $Q=m_\ell I\cos2\xi$, and the likelihood is formed on the
-absolute Stokes visibilities (or, in the circular basis, on $RR,LL,RL,LR$)---not
-on $m_\ell$ or on any quantity requiring $Q/I$. The fractional structure lives
-entirely in the forward model.
+The classic objection to fractional parameterizations---dividing by a vanishing
+$I$---never applied to our fractional chart (it \emph{multiplies},
+$Q=m_\ell I\cos2\xi$) and applies even less to the direct chart, where $Q,U$ are
+primary fields. In both charts the likelihood is formed on the absolute Stokes /
+circular visibilities $RR,LL,RL,LR$; no quantity requiring $Q/I$ ever enters.
 
 \section{Summary}
-Modeling $Q,U$ as free fields over-parameterizes the physical state: it admits
-$P>I$ and polarized flux where $I=0$, which is almost certainly how a
-free-$(Q,U)$ fit reaches $\chi^2\!\approx\!1$ with unphysical images. Fitting in
-the $(I,m_\ell,\xi)$ chart with a sigmoid on $m_\ell$ confines the model to
-exactly the physical manifold, ties polarization to the (separately
-regularized) total intensity, and starts the source unpolarized---while keeping
-the likelihood on absolute Stokes. It is the same three degrees of freedom,
-expressed in the coordinates where ``physical'' means ``box-bounded.''
+The fractional chart $(I,m_\ell,\xi)$ makes $P\le I$ and polarization support into
+box constraints, but its unit-normalized EVPA direction cannot be optimized onto
+the winding-2 configurations that ordinary ring EVPAs (radial/azimuthal/spiral)
+require; the fit collapses to a near-uniform EVPA. We fit the direct chart
+$(I,Q,U)$, which has no such obstruction, and re-impose support and $P\le I$ as
+soft priors---chiefly an intensity-gated support penalty~\eqref{eq:support-prior}
+with a stop-gradient reference on $I$---to close the off-source null-space haze
+that a direct fit would otherwise exploit. Diagnostics confirm the synthetic
+target is consistent with the data and strongly identified, so the reconstruction
+task is well posed once the haze escape is removed.
 \end{document}
