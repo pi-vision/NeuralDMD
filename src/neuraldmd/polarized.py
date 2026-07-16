@@ -22,9 +22,12 @@ freedom in the coordinate chart where those constraints are a simple box on
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from .config import StokesConfig
 from .model import NeuralDMD, physical_intensities
@@ -68,6 +71,7 @@ class PolarizedNeuralDMD(eqx.Module):
     stokes: tuple[str, ...] = eqx.field(static=True)
     outshift: float = eqx.field(static=True)
     scaling_ml: float = eqx.field(static=True)
+    fix_flux: tuple[float, ...] | None = eqx.field(static=True)
     pol_param: str = eqx.field(static=True)
 
     def __init__(
@@ -78,6 +82,7 @@ class PolarizedNeuralDMD(eqx.Module):
         key: jax.Array,
         outshift: float = 2.0,
         scaling_ml: float = 1.0,
+        fix_flux: float | Sequence[float] | None = None,
         r_pol: int | None = None,
         pol_param: str = "fractional",
         pol_model_kwargs: dict | None = None,
@@ -145,6 +150,13 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
+        if fix_flux is None:
+            self.fix_flux = None
+        else:
+            vals = np.atleast_1d(np.asarray(fix_flux, dtype=float)).ravel()
+            if vals.size == 0 or not np.all(np.isfinite(vals)) or np.any(vals <= 0):
+                raise ValueError("fix_flux must be positive and finite")
+            self.fix_flux = tuple(float(v) for v in vals)
         if pol_param not in ("fractional", "direct", "iscaled", "expm", "expm_full"):
             raise ValueError(
                 "pol_param must be 'fractional', 'direct', 'iscaled', 'expm', or "
@@ -166,6 +178,68 @@ class PolarizedNeuralDMD(eqx.Module):
         self.gains = None
 
     def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
+        """Physical per-Stokes image cubes, with the total flux fixed if configured.
+
+        This wraps the parameterization-specific fields (:meth:`_stokes_fields_unscaled`)
+        so that **every** consumer -- the likelihood, the evaluation/export path, the
+        diagnostics -- sees the same cube. Applying the flux constraint in the loss
+        instead would let training and export disagree about the brightness, which is
+        the class of bug that produced a 7.3 Jy phantom offset once already.
+
+        When ``fix_flux`` is set, the networks supply only the *shape*: the total is
+        divided out and replaced. The flux degree of freedom then does not exist, so a
+        global station-gain scale has nothing to trade against. A soft flux penalty
+        cannot achieve this -- it is one term against the likelihood and can be
+        outvoted (measured: even at ``flux_weight=1000`` a global gain scale survived
+        and the fitted gains lost to a do-nothing baseline).
+
+        All Stokes are scaled by the **same** factor, so every polarization fraction
+        (``m_l``, EVPA, ``m_c``) is left exactly untouched.
+
+        Parameters
+        ----------
+        xy : jax.Array
+            Pixel coordinates.
+        times : jax.Array
+            Frame indices/times.
+        frame_max, frame_min : dict
+            Per-Stokes physical scaling.
+
+        Returns
+        -------
+        images : dict of jax.Array
+            ``(P_pix, T)`` per Stokes. If ``fix_flux`` is set, ``sum_p images["I"][:, t]
+            == fix_flux`` for every frame ``t``.
+        modes : list of tuple
+            ``(W0, W, b0, b)`` per sub-network, unchanged.
+        """
+        images, modes = self._stokes_fields_unscaled(xy, times, frame_max, frame_min)
+        if self.fix_flux is not None:
+            lc = jnp.asarray(self.fix_flux)
+            if lc.size == 1:
+                flux_t = jnp.broadcast_to(lc[0], jnp.shape(times))
+            else:
+                # `times` is NORMALIZED time in [0, 1] (it drives exp(Omega*t*t_scale)),
+                # not a frame index -- so the curve is sampled by interpolation onto
+                # whatever times this batch carries. Minibatches see a subset and the
+                # export path sees all frames; both land on the same curve.
+                grid = jnp.linspace(0.0, 1.0, lc.size)
+                flux_t = jnp.interp(times, grid, lc)
+            total = jnp.sum(images["I"], axis=0)  # (T,)
+            # Guard the singular total == 0 only, and PRESERVE THE SIGN. Clipping the
+            # denominator to a positive floor instead looks safer and is not: an
+            # untrained field can integrate negative, and clipping then returns a
+            # huge positive scale that blows the image up (measured: sum(I) = -1.2e8
+            # against a target of 2.7) -- i.e. the guard destroys the very invariant
+            # it guards. With the sign kept, sum(I) == flux holds exactly for any
+            # nonzero total; a negative total merely flips the field, which the disk
+            # pretrain and the negativity penalty prevent in practice.
+            safe = jnp.where(jnp.abs(total) < 1e-6, 1e-6, total)
+            scale = flux_t / safe
+            images = {s: v * scale[None, :] for s, v in images.items()}
+        return images, modes
+
+    def _stokes_fields_unscaled(self, xy, times, frame_max: dict, frame_min: dict):
         """Physical per-Stokes image cubes and per-network modes (loss/eval interface).
 
         Parameters

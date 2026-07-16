@@ -84,9 +84,17 @@ def parse_args():
         nargs=2,
         default=(0.5, 2.0),
         metavar=("LO", "HI"),
-        help="hard sigmoid bounds on gain amplitude; must strictly bracket 1. The "
-        "default (0.9, 1.1) of StationGains is far too tight for real corruption "
-        "(on-sky fits land near 0.7-0.9) and would silently rail",
+        help="hard sigmoid bounds on gain amplitude, applied to EVERY station; must "
+        "strictly bracket 1. Ignored when --gain-bounds-physical is set",
+    )
+    ap.add_argument(
+        "--gain-bounds-physical",
+        action="store_true",
+        help="bound each station by ITS OWN calibration quality (EHT_GAIN_PRIORS: ALMA "
+        "+-3%%, LMT +-15%%, ...) instead of one global box. A global box makes every "
+        "station equally free, leaving the overall gain scale -- which is degenerate "
+        "with total source flux -- unconstrained; well-calibrated stations are what pin "
+        "it. Requires station names in the data",
     )
     ap.add_argument(
         "--gain-phase",
@@ -194,6 +202,18 @@ def parse_args():
         "--flux", type=float, default=None, help="known total flux [Jy] (anchor off=None)"
     )
     ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
+    ap.add_argument(
+        "--fix-flux",
+        choices=("measured", "given"),
+        default=None,
+        help="FIX the total flux structurally instead of nudging it with --flux-weight: "
+        "the networks supply only the shape and the total is supplied per frame, so the "
+        "flux degree of freedom -- degenerate with the global gain amplitude -- does not "
+        "exist. 'measured' takes the lightcurve from intra-site baselines (works on any "
+        "array with a co-located pair, no truth needed); 'given' pins it to --flux. A "
+        "soft anchor cannot substitute: swept to --flux-weight 1000, a global gain scale "
+        "survived and the fitted gains still lost to a do-nothing baseline",
+    )
     ap.add_argument(
         "--compact-weight",
         type=float,
@@ -341,12 +361,32 @@ def main():
         }.items()
         if v is not None
     }
+    # Total flux: supply it rather than fit it. It is degenerate with the global gain
+    # amplitude, and a soft anchor loses that argument -- swept to flux_weight=1000 and
+    # the gains still scored worse than assuming no gains at all. Measured from
+    # intra-site baselines (co-located dishes see the source unresolved, so |V| is the
+    # total flux), which is a data product, so this works on any array that has such a
+    # pair -- no truth knowledge.
+    fix_flux = None
+    if args.fix_flux:
+        from neuraldmd.data.lightcurve import measure_lightcurve
+
+        lc = measure_lightcurve(op)
+        fix_flux = lc if args.fix_flux == "measured" else float(args.flux)
+        src = (
+            f"measured from intra-site baselines: {lc.mean():.4f} +- {lc.std():.4f} Jy"
+            if args.fix_flux == "measured"
+            else f"held at --flux {args.flux} Jy (measured would have been {lc.mean():.4f})"
+        )
+        print(f"Total flux FIXED, {src}", flush=True)
+
     model = PolarizedNeuralDMD(
         stokes,
         r=args.r,
         key=jax.random.PRNGKey(args.seed),
         outshift=args.outshift,
         scaling_ml=args.scaling_ml,
+        fix_flux=fix_flux,
         r_pol=args.r_pol,
         pol_param=args.pol_param,
         pol_model_kwargs=pol_kwargs or None,
@@ -360,25 +400,50 @@ def main():
         # Attach the gain table to the sky model: it becomes part of the same pytree,
         # so the optimizer solves calibration and image together. Needs station ids
         # (any dataset from load_uvfits_to_products has them).
-        from neuraldmd.calibration import StationGains
+        from neuraldmd.calibration import StationGains, eht_amp_bounds
         from neuraldmd.polarized import with_gains
 
         if op.bl_station_ids is None:
             raise SystemExit("--fit-gains needs a dataset with bl_station_ids")
         n_st = len(op.stations) if op.stations else int(op.bl_station_ids.max()) + 1
+        if args.gain_bounds_physical:
+            # Per-station bounds from each station's real calibration quality. A single
+            # global box leaves every station equally free, so the overall gain scale --
+            # degenerate with total flux -- floats: measured, a 1.153 scale with the
+            # source flux collapsing to match.
+            if not op.stations:
+                raise SystemExit("--gain-bounds-physical needs station names in the data")
+            amp_bounds = eht_amp_bounds(op.stations)
+            bounds_desc = "physical per-station: " + ", ".join(
+                f"{s}[{lo:.2f},{hi:.2f}]"
+                for s, (lo, hi) in zip(op.stations, amp_bounds, strict=True)
+            )
+        else:
+            amp_bounds = tuple(args.gain_amp_bounds)
+            bounds_desc = f"global {amp_bounds}"
         gains = StationGains(
             n_stations=n_st,
             n_times=int(op.A.shape[0]),
             n_hands=args.gain_hands,
             use_phase=args.gain_phase,
-            amp_bounds=tuple(args.gain_amp_bounds),
+            amp_bounds=amp_bounds,
             ref_station=args.gain_ref_station,
         )
         model = with_gains(model, gains)
+        # Persist the RESOLVED per-station bounds. config.json was written from
+        # vars(args) before this point, so it records the CLI default, not what was
+        # used. The bounds are static fields -- tree_deserialise_leaves will not
+        # restore them -- so anything reloading this checkpoint rebuilds StationGains
+        # from config and would decode amp_raw through the WRONG bounds, reporting
+        # wrong amplitudes with no error.
+        cfg_path = out / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["gain_amp_bounds_resolved"] = [list(b) for b in gains.amp_bounds]
+        cfg_path.write_text(json.dumps(cfg, indent=2, default=str))
         print(
             f"Fitting station gains: {n_st} stations x {op.A.shape[0]} times, "
             f"{args.gain_hands} hand(s){' + phase' if args.gain_phase else ' (amplitude only)'}, "
-            f"amp bounds {tuple(args.gain_amp_bounds)}",
+            f"amp bounds {bounds_desc}",
             flush=True,
         )
 
@@ -525,7 +590,7 @@ def main():
 
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
-    # global EVPA-swirl metric (EHT/KINE standard): m=2 azimuthal mode of the
+    # global EVPA-swirl metric (EHT standard, Palumbo et al.): m=2 azimuthal mode of the
     # polarization field -- amplitude ratio recovered + phase (orientation) error
     beta2_amp_ratio, beta2_phase_err = ev.beta2_error(recon, truth_cubes, args.fov_uas)
     # record both absolute |beta2| values, not just their ratio: if the truth movie
@@ -683,7 +748,7 @@ def main():
             "nrmse_QU_le_0.15": (nrmse["Q"] <= 0.15 and nrmse["U"] <= 0.15),
             "evpa_le_10deg": bool(evpa_err <= 10.0),
             # global-swirl gate: recover >=70% of the m=2 amplitude with <=20 deg
-            # orientation error (the EHT/KINE-style "structure recovered" bar).
+            # orientation error (the EHT-style "structure recovered" bar).
             # Guarded on the truth actually carrying a swirl -- on a truth with
             # |beta2|~0 the ratio is 0/0 and reads large for a pure-noise recon.
             "beta2_recovered": bool(
