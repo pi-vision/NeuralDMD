@@ -67,6 +67,7 @@ class PolarizedNeuralDMD(eqx.Module):
     stokes: tuple[str, ...] = eqx.field(static=True)
     outshift: float = eqx.field(static=True)
     scaling_ml: float = eqx.field(static=True)
+    pol_param: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -77,6 +78,7 @@ class PolarizedNeuralDMD(eqx.Module):
         outshift: float = 2.0,
         scaling_ml: float = 1.0,
         r_pol: int | None = None,
+        pol_param: str = "fractional",
         pol_model_kwargs: dict | None = None,
         **model_kwargs,
     ):
@@ -98,6 +100,17 @@ class PolarizedNeuralDMD(eqx.Module):
             Complex DMD modes for the polarization fields (``m_l``, EVPA, ``m_c``).
             Defaults to ``r``. Set ``r_pol < r`` to deliberately starve the
             polarization's *temporal* capacity relative to I.
+        pol_param : {"fractional", "direct"}
+            Polarization parameterization. ``"fractional"`` (default) derives
+            ``Q,U`` from ``(m_l, EVPA)`` fields (``P <= I`` by construction, but
+            the *unit-normalized* EVPA direction must wind ``2 * (azimuthal mode)``
+            times around the source -- a topological constraint that makes an
+            m>=2 EVPA spiral very hard to optimize, collapsing to m=1). ``"direct"``
+            makes ``Q`` and ``U`` independent signed :class:`NeuralDMD` fields in
+            Stokes-I units (plan D8): no winding constraint, so an m=2 pattern is
+            as easy to fit as the ring itself. ``P <= I`` and off-source pol
+            suppression then come from the loss's soft ``p_weight`` penalty
+            (``sum relu(sqrt(Q^2+U^2+V^2) - I)^2``), NOT by construction.
         pol_model_kwargs : dict or None
             Overrides applied on top of ``model_kwargs`` for the polarization
             fields only (e.g. ``{"hidden_size": 128, "num_layers": 2,
@@ -113,6 +126,9 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
+        if pol_param not in ("fractional", "direct"):
+            raise ValueError(f"pol_param must be 'fractional' or 'direct', got {pol_param!r}")
+        self.pol_param = str(pol_param)
         r_pol = r if r_pol is None else int(r_pol)
         pol_kwargs = {**model_kwargs, **(pol_model_kwargs or {})}
         want_v = "V" in self.stokes
@@ -147,6 +163,30 @@ class PolarizedNeuralDMD(eqx.Module):
         i_img, i_modes = physical_intensities(
             self.intensity, xy, times, frame_max["I"], frame_min["I"]
         )
+
+        if self.pol_param == "direct":
+            # Direct signed Q, U (plan D8): independent NeuralDMD fields scaled to
+            # Stokes-I units. No m_l/EVPA rotation -> no topological winding
+            # constraint on the EVPA direction, so an m=2 (spiral) pattern fits as
+            # readily as the ring itself. P<=I and off-source pol suppression come
+            # from the loss's soft ``p_weight`` penalty, not by construction.
+            q_img, q_modes = physical_intensities(self.frac, xy, times, frame_max["I"], 0.0)
+            u_img, u_modes = physical_intensities(self.cos2xi, xy, times, frame_max["I"], 0.0)
+            # sin2xi kept live (spare) so the pol freeze/warmup update partition and
+            # the modes/sparsity list stay identical across both parameterizations.
+            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)
+            images = {"I": i_img}
+            modes = [i_modes, q_modes, u_modes, s_modes]
+            if "Q" in self.stokes:
+                images["Q"] = q_img
+            if "U" in self.stokes:
+                images["U"] = u_img
+            if self.circ is not None:
+                v_img, v_modes = physical_intensities(self.circ, xy, times, frame_max["I"], 0.0)
+                images["V"] = v_img
+                modes.append(v_modes)
+            return images, modes
+
         ml_raw, ml_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
         c_raw, c_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
         s_raw, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)

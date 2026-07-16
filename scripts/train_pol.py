@@ -73,6 +73,21 @@ def parse_args():
     # fractional-pol controls
     ap.add_argument("--scaling-ml", type=float, default=1.0, help="Cap on linear pol fraction")
     ap.add_argument("--outshift", type=float, default=2.0, help="m_l sigmoid bias (small init)")
+    ap.add_argument(
+        "--pol-param",
+        default="fractional",
+        choices=["fractional", "direct"],
+        help="pol parameterization: 'fractional' (m_l,EVPA; P<=I by construction, "
+        "but EVPA winding makes m>=2 spirals hard) or 'direct' (independent signed "
+        "Q,U fields; m=2 fits like the ring; needs --p-weight for P<=I)",
+    )
+    ap.add_argument(
+        "--p-weight",
+        type=float,
+        default=0.0,
+        help="soft P<=I penalty weight (sum relu(sqrt(Q^2+U^2)-I)^2); "
+        "recommended >0 with --pol-param direct to suppress off-source pol",
+    )
     # polarization regularization / curriculum (anti-overfit levers)
     ap.add_argument(
         "--r-pol",
@@ -238,6 +253,7 @@ def main():
         outshift=args.outshift,
         scaling_ml=args.scaling_ml,
         r_pol=args.r_pol,
+        pol_param=args.pol_param,
         pol_model_kwargs=pol_kwargs or None,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
@@ -267,6 +283,7 @@ def main():
         flux_target=args.flux,
         flux_weight=args.flux_weight,
         compact_weight=args.compact_weight,
+        p_le_i_weight=args.p_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,
     )
@@ -339,7 +356,8 @@ def main():
         import matplotlib.pyplot as plt
 
         xy_grid = ev.pixel_grid_coords(args.npix, args.npix)  # jax accepts numpy
-        for name, sub in (("I", model.intensity), ("mfrac", model.frac)):
+        pol_field_name = "Q" if args.pol_param == "direct" else "mfrac"
+        for name, sub in (("I", model.intensity), (pol_field_name, model.frac)):
             w0, w, om, b0, b = sub(xy_grid)
             w_s, om_s, _ = ev.sort_modes_by_lambda(w, om, b)
             ev.plot_modes(
