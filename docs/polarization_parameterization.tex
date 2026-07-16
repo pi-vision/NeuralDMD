@@ -217,6 +217,13 @@ window and is tracked at correlation $+1.000$: \textbf{polarization dynamics are
 recovered}, not merely polarization.
 
 \paragraph{Why \emph{fractional}, when other charts score better on individual models.}
+\textbf{The ranking below is superseded --- read
+Section~\ref{sec:noise} before using it.} Every cell of the grid drew its own noise
+realization (a seeding defect, since fixed), and the EVPA it is ranked by turns out to
+vary by more than the spread between charts. The table is retained because the
+$\chi^2$ column and the \texttt{expm\_full} failure are still informative, and because
+the re-run must be compared against it.
+
 We ran the full grid: 4 models $\times$ 5 parameterizations, one configuration, no
 per-cell tuning. Ranked by the \emph{worst} case rather than the best:
 \begin{center}
@@ -293,6 +300,61 @@ that the detail we added is the one costing us \texttt{varbeta2} is the actionab
 barrier-free charts on \texttt{varbeta2} while keeping fractional's \texttt{hs-pol}, and
 so pass 4/4 with the best worst-case in the table.} If it does not, the split hypothesis
 above is wrong and should be discarded.
+
+\section{How much of this is noise?}
+\label{sec:noise}
+
+Every dataset above was generated with an \textbf{unseeded} noise realization, through
+two independent defects. First, \texttt{ehtim}'s \texttt{observe} seeds via
+\texttt{if seed: np.random.seed(seed)}; we passed \texttt{-{}-seed 0}, which is
+\emph{falsy}, so seeding never ran at all. Second, \texttt{PYTHONHASHSEED} is
+randomized per process, which changes dict/set iteration order inside \texttt{ehtim}
+and therefore the \emph{order} random numbers are consumed --- so even a correctly
+seeded run differs process to process (measured: same seed, two processes, $\max|\Delta
+V| = 0.14$\,Jy on 52 of 63 points). Both are fixed; both were needed.
+
+The consequence is that \textbf{the grid compared parameterizations across different
+noise draws}. To size that, we re-ran one cell (\texttt{varbeta2}, fractional) at the
+identical configuration, changing only the realization:
+
+\begin{center}
+\begin{tabular}{@{}lccl@{}}
+\toprule
+metric & published draw & fresh draw & verdict \\
+\midrule
+$\chi^2$              & 0.47  & 0.45   & stable \\
+NRMSE$_I$             & 0.130 & 0.112  & stable \\
+$\beta_2$ amp ratio   & 1.002 & 0.950  & stable ($\sim$5\%) \\
+$\beta_2$ phase corr  & $+1.000$ & $+0.9999$ & \textbf{rock solid} \\
+NRMSE$_Q$             & 0.215 & \textbf{1.087} & \textbf{5$\times$ swing} \\
+EVPA                  & $1.9^\circ$ & $\mathbf{21.0^\circ}$ & \textbf{11$\times$ swing} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two conclusions, in opposite directions.
+
+\textbf{The physics results stand.} $\chi^2$, NRMSE$_I$ and --- decisively --- the
+$\beta_2$ phase correlation reproduce across draws. The claim that \emph{polarization
+dynamics are recovered}, which rests on that correlation, survives resampling at
+$+1.000$ and $+0.9999$. Stokes~$I$ recovery is likewise stable.
+
+\textbf{The chart ranking does not.} Section~\ref{sec:results} ranks the five charts by
+worst-case EVPA ($9.6^\circ$ for fractional against $13.5$--$19.0^\circ$), but EVPA at
+a \emph{fixed} configuration moves from $1.9^\circ$ to $21.0^\circ$. The realization
+variance is larger than the entire spread the ranking is built on, so \textbf{EVPA
+cannot separate these charts at this noise level} and ``fractional is the only chart
+that never breaks'' is not established by that grid. It may still be true; this
+experiment cannot say.
+
+\textbf{What to rank on instead.} The $\beta_2$ amplitude ratio is stable to $\sim$5\%
+\emph{and} still discriminates: on \texttt{varbeta2} it is $0.762$ for \texttt{direct}
+against $0.985$--$1.006$ for fractional, \texttt{expm}, \texttt{iscaled} and
+\texttt{expm\_full}. That is a real separation on a metric that survives resampling,
+and it indicts the one chart with no support constraint --- which is what the physics
+of Section~\ref{sec:charts} predicts. The grid should be re-run with fixed seeds and
+one shared dataset per model, and ranked on $\beta_2$ rather than EVPA, before any
+chart claim is relied upon.
 
 \section{The two priors, and their scales}
 \label{sec:dyn}
