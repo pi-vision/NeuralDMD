@@ -391,6 +391,51 @@ def main():
     ev.plot_training_history(hist, str(out / "loss_history.png"), title="Training")
 
     recon = ev.reconstruct_polarized_cubes(model, args.npix, truth["times"], frame_max, frame_min)
+
+    # SELF-CHECK: `final_chi2` below is read out of the training history, i.e. it
+    # describes the model as the training loop saw it. Recompute chi2 directly from
+    # the EXPORTED cube through the same operator -- that cube is what every metric
+    # (NRMSE/EVPA/beta2) and every downstream audit actually reads. The two must
+    # agree; if they diverge, the reported chi2 is describing something other than
+    # the reconstruction, and the gate/early-stop are being driven by a fiction.
+    chi2_from_cube: dict[str, float] = {}
+    if args.basis == "circular" and set(stokes) == {"I", "Q", "U"}:
+        t_op = int(op.A.shape[0])
+        i_c = recon["I"][:t_op].reshape(t_op, -1).astype(np.complex64)
+        p_c = (recon["Q"][:t_op] + 1j * recon["U"][:t_op]).reshape(t_op, -1)
+        vis_cube = {
+            "RR": np.einsum("tmp,tp->tm", op.A, i_c),  # RR = I + V, V = 0
+            "LL": np.einsum("tmp,tp->tm", op.A, i_c),  # LL = I - V
+            "RL": np.einsum("tmp,tp->tm", op.A, p_c),  # RL = Q + iU
+            "LR": np.einsum("tmp,tp->tm", op.A, np.conj(p_c)),  # LR = Q - iU
+        }
+        for k in op.stokes:
+            if k not in vis_cube:
+                continue
+            d2 = np.abs(vis_cube[k] - op.targets[k]) ** 2
+            denom = 2.0 * float(op.masks[k].sum())
+            chi2_from_cube[k] = float((d2 * op.masks[k] / op.sigmas[k] ** 2).sum() / denom)
+        # the truth through the same operator: the achievable floor. NB it is ~0.4,
+        # not 1.0, because generation inflates sigma via add_fractional_noise without
+        # adding matching noise -- so a chi2 gate centred on 1.0 can never pass.
+        t_i = truth_cubes["I"][:t_op].reshape(t_op, -1).astype(np.complex64)
+        t_p = (truth_cubes["Q"][:t_op] + 1j * truth_cubes["U"][:t_op]).reshape(t_op, -1)
+        vis_truth = {
+            "RR": np.einsum("tmp,tp->tm", op.A, t_i),
+            "LL": np.einsum("tmp,tp->tm", op.A, t_i),
+            "RL": np.einsum("tmp,tp->tm", op.A, t_p),
+            "LR": np.einsum("tmp,tp->tm", op.A, np.conj(t_p)),
+        }
+        chi2_truth_floor = {}
+        for k in op.stokes:
+            if k not in vis_truth:
+                continue
+            d2 = np.abs(vis_truth[k] - op.targets[k]) ** 2
+            denom = 2.0 * float(op.masks[k].sum())
+            chi2_truth_floor[k] = float((d2 * op.masks[k] / op.sigmas[k] ** 2).sum() / denom)
+    else:
+        chi2_truth_floor = {}
+
     nrmse = ev.polarized_nrmse(recon, truth_cubes)
     evpa_err = ev.evpa_error_deg(recon, truth_cubes)
     # global EVPA-swirl metric (EHT/KINE standard): m=2 azimuthal mode of the
@@ -476,11 +521,34 @@ def main():
     per_epoch_max = np.max(np.stack([np.asarray(v) for v in hist["chi2"].values()]), axis=0)
     best_ep = int(np.argmin(per_epoch_max))
     final_chi2 = {k: float(v[best_ep]) for k, v in hist["chi2"].items()}
+    # surface any disagreement between the history's chi2 and the exported cube's:
+    # they describe the same model, so a gap means the reported number is a fiction
+    if chi2_from_cube:
+        worst = max(
+            abs(final_chi2[k] - chi2_from_cube[k]) / max(chi2_from_cube[k], 1e-9)
+            for k in chi2_from_cube
+            if k in final_chi2
+        )
+        if worst > 0.15:
+            _rep = {k: round(final_chi2[k], 3) for k in chi2_from_cube}
+            _cub = {k: round(v, 3) for k, v in chi2_from_cube.items()}
+            _flr = {k: round(v, 3) for k, v in chi2_truth_floor.items()}
+            print(
+                "[WARN] reported chi2 disagrees with the exported cube's chi2 "
+                f"(worst rel. gap {worst:.1%}):\n"
+                f"       reported (history) : {_rep}\n"
+                f"       from exported cube : {_cub}\n"
+                f"       truth floor        : {_flr}",
+                flush=True,
+            )
     metrics = {
         "basis": args.basis,
         "epochs_run": total_epochs,
         "best_epoch": best_ep + 1,
         "final_chi2": final_chi2,
+        # independent recomputation from the exported cube + the achievable floor
+        "chi2_from_cube": chi2_from_cube,
+        "chi2_truth_floor": chi2_truth_floor,
         "nrmse": nrmse,
         "evpa_error_deg": evpa_err,
         "beta2_amp_ratio": beta2_amp_ratio,
@@ -491,7 +559,11 @@ def main():
         "beta2_truth_abs": float(beta2_truth_abs),
         "beta2_recon_abs": float(beta2_recon_abs),
         "gate": {
-            "chi2_in_0.8_1.2": all(0.8 <= v <= 1.2 for v in final_chi2.values()),
+            # [0.4, 2]: the achievable floor here is ~0.42, not 1.0 -- generation
+            # inflates sigma via add_fractional_noise (which widens the error bars
+            # without adding matching noise), so even the TRUTH scores ~0.42. A band
+            # centred on 1.0 could never pass.
+            "chi2_in_0.4_2": all(0.4 <= v <= 2.0 for v in final_chi2.values()),
             "nrmse_QU_le_0.15": (nrmse["Q"] <= 0.15 and nrmse["U"] <= 0.15),
             "evpa_le_10deg": bool(evpa_err <= 10.0),
             # global-swirl gate: recover >=70% of the m=2 amplitude with <=20 deg

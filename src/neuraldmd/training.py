@@ -518,6 +518,7 @@ def train_polarized_model(
         "train_chi2": {k: [] for k in hist_keys},
     }
     best_metric = float("inf")
+    best_model = None
     at_noise = 0
 
     with tqdm(total=num_epochs) as pbar:
@@ -589,9 +590,16 @@ def train_polarized_model(
                     flush=True,
                 )
 
-            # track the best on the worst-product (true) chi2
+            # track the best on the worst-product (true) chi2. Keep the winner IN
+            # MEMORY (equinox models are immutable pytrees, so this is a free, exact
+            # reference) and serialise only as an artifact: round-tripping the live
+            # model through an 11 MB file rewritten hundreds of times on NFS was
+            # silently returning a stale early snapshot, so the evaluated model had
+            # chi2 ~72-116 (untrained) no matter how long training ran, while the
+            # history correctly recorded the real trajectory.
             if max_chi2 < best_metric:
                 best_metric = max_chi2
+                best_model = model
                 eqx.tree_serialise_leaves(ckpt_path, model)
 
             if early_stop_chi2 is not None:
@@ -603,10 +611,36 @@ def train_polarized_model(
                     )
                     break
 
-    # evaluate/return the BEST checkpoint, not the last: late-stage LR noise makes
-    # the final epoch a poor snapshot, and the driver evaluates the returned model
-    model = eqx.tree_deserialise_leaves(ckpt_path, model)
-    print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}")
+    # return the BEST checkpoint, not the last: late-stage LR noise makes the final
+    # epoch a poor snapshot, and the driver evaluates the returned model. Taken from
+    # memory, never re-read from disk (see the serialise site above).
+    model = best_model if best_model is not None else model
+    # VERIFY: the returned model is what the driver evaluates and exports, so it must
+    # actually score `best_metric`. A silent mismatch here means every downstream
+    # metric describes a model the history never saw.
+    restored_chi2 = _eval_chi2_full(
+        model,
+        xy_eval,
+        t_eval,
+        a_eval,
+        tgt_eval,
+        sig_eval,
+        msk_eval,
+        frame_max,
+        frame_min,
+        basis=basis,
+        products=products,
+    )
+    restored_max = float(max(float(v) for v in restored_chi2.values()))
+    print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}", flush=True)
+    if abs(restored_max - best_metric) > 0.05 * max(best_metric, 1e-9):
+        print(
+            f"[WARN] restored checkpoint scores max chi2 {restored_max:.3f}, but the "
+            f"history recorded {best_metric:.3f} for it -- the returned model is NOT "
+            f"the checkpointed one. Per-product: "
+            f"{ {k: round(float(v), 3) for k, v in restored_chi2.items()} }",
+            flush=True,
+        )
     return model, history
 
 
