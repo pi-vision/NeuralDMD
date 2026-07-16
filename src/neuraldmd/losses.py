@@ -243,18 +243,16 @@ def polarized_loss_fn(
         flux_penalty = jnp.asarray(0.0)
 
     if compact_weight:
-        # compactness prior: the flux-weighted mean squared radius (i.e. the
-        # source size), penalized per frame. Off-source haze (large radius)
-        # lives in the short-baseline null space and is not otherwise
-        # constrained; minimizing the source size suppresses it while barely
-        # moving the central emission. Scale-invariant (normalized by the flux),
-        # so the weight is independent of the intensity units. ``xy`` are the
-        # (network) pixel coordinates.
+        # compactness prior: the second moment of Stokes I about the field
+        # center (radially-weighted total flux). Off-source haze (large radius)
+        # lives in the short-baseline null space and is otherwise unconstrained;
+        # this penalizes peripheral flux *absolutely* -- unlike a flux-normalized
+        # source-size, which the model games by brightening the center instead of
+        # removing the haze. ``xy`` are the (network) pixel coordinates; ``r2`` is
+        # normalized to O(1) so the weight is roughly intensity-unit-independent.
         r2 = xy[:, 0] ** 2 + xy[:, 1] ** 2
         r2 = (r2 / (jnp.mean(r2) + 1e-12))[:, None]  # (P, 1), ~O(1)
-        pos_i = jax.nn.relu(images["I"])  # (P, T)
-        size2 = jnp.sum(pos_i * r2, axis=0) / (jnp.sum(pos_i, axis=0) + 1e-8)  # (T,)
-        compact_penalty = jnp.mean(size2)
+        compact_penalty = jnp.mean(jnp.sum(jax.nn.relu(images["I"]) * r2, axis=0))
     else:
         compact_penalty = jnp.asarray(0.0)
 
