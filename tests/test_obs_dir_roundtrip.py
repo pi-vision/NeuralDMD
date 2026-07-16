@@ -99,6 +99,5 @@ def test_obs_dir_roundtrip_preserves_chi2_of_a_fixed_image(tmp_path):
     a, b = chi2(op), chi2(back)
     for k in P:
         assert a[k] == pytest.approx(b[k], rel=1e-6), (
-            f"chi2[{k}] differs across the round-trip: "
-            f"{a[k]} (in-memory) vs {b[k]} (on disk)"
+            f"chi2[{k}] differs across the round-trip: {a[k]} (in-memory) vs {b[k]} (on disk)"
         )

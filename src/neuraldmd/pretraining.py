@@ -230,7 +230,13 @@ def pretrain_log_intensity(
     _, height, width = np.asarray(truth_i).shape
     r_g, _ = radius_of_gyration(truth_i, fov_x=fov, fov_y=fov)
     _z, _picked, mask, xy = build_zernike_targets(
-        height, width, radius_scale * r_g, fov, fov, model_i.r + 1, max_n=max_n,
+        height,
+        width,
+        radius_scale * r_g,
+        fov,
+        fov,
+        model_i.r + 1,
+        max_n=max_n,
         prefer_ms=(0, 1, 2, 3),
     )
     xy = jnp.asarray(xy)
