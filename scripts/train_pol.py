@@ -174,6 +174,15 @@ def parse_args():
         help="support gate scale as a fraction of peak I (smaller = harder gate)",
     )
     ap.add_argument(
+        "--dyn-compact-weight",
+        type=float,
+        default=0.0,
+        help="compactness prior on the Stokes-I DYNAMIC modes only (sum |W|*r^2): "
+        "confines time-varying structure to small radius while leaving the static "
+        "ring untouched -- unlike --compact-weight, which penalizes total I and "
+        "squeezes the ring along with the off-source dynamic haze",
+    )
+    ap.add_argument(
         "--pol-l1-weight",
         type=float,
         default=0.0,
@@ -335,6 +344,7 @@ def main():
         pol_support_weight=args.pol_support_weight,
         pol_support_tau=args.pol_support_tau,
         pol_l1_weight=args.pol_l1_weight,
+        dyn_compact_weight=args.dyn_compact_weight,
         p_le_i_weight=args.p_weight,
         early_stop_chi2=args.early_stop_chi2,
         print_every=200,

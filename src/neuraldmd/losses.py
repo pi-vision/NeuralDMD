@@ -131,6 +131,7 @@ def polarized_loss_fn(
     pol_support_weight: float = 0.0,
     pol_support_tau: float = 0.05,
     pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
 ):
     """Data-fidelity loss for a :class:`PolarizedNeuralDMD`, Stokes or circular basis.
 
@@ -275,7 +276,7 @@ def polarized_loss_fn(
     else:
         flux_penalty = jnp.asarray(0.0)
 
-    if compact_weight or compact_pol_weight:
+    if compact_weight or compact_pol_weight or dyn_compact_weight:
         # compactness prior: the second moment about the field center (radially-
         # weighted total flux). Off-source haze (large radius) lives in the
         # short-baseline null space and is otherwise unconstrained; this penalizes
@@ -288,6 +289,22 @@ def polarized_loss_fn(
         compact_penalty = jnp.mean(jnp.sum(jax.nn.relu(images["I"]) * r2, axis=0))
     else:
         compact_penalty = jnp.asarray(0.0)
+
+    if dyn_compact_weight:
+        # DYNAMIC compactness: the radial second moment of the Stokes-I *dynamic*
+        # spatial modes only. In `I = W0.b0 + 2 Re sum_j W[:,j] e^{Omega_j t} b_j`,
+        # variability at pixel p comes from |W[p, j]| -- so penalizing |W| * r^2
+        # confines the TIME-VARYING structure to small radius while leaving the
+        # static ring (W0) completely untouched. `compact_weight` cannot do this:
+        # it penalizes total I, so the ring at r~28 uas and the dynamic haze at
+        # r>50 uas differ by only ~4.6x in r^2 and the ring gets squeezed too.
+        # Measured motivation: the truth's variability is entirely on-ring (0.355
+        # on-ring, 0.003 beyond 50 uas); the recon leaks 0.379 off-source (126x).
+        # modes[0] is the intensity sub-network in every parameterization branch.
+        w_dyn = modes[0][1]  # (P_pix, r) dynamic spatial modes of Stokes I
+        dyn_compact_penalty = jnp.sum(jnp.abs(w_dyn) * r2) / w_dyn.shape[1]
+    else:
+        dyn_compact_penalty = jnp.asarray(0.0)
 
     if (compact_pol_weight or pol_support_weight or pol_l1_weight) and pol:
         p_mag = jnp.sqrt(sum(images[s] ** 2 for s in pol) + 1e-12)  # (P_pix, T)
@@ -350,6 +367,7 @@ def polarized_loss_fn(
         + p_le_i_weight * p_penalty
         + flux_weight * flux_penalty
         + compact_weight * compact_penalty
+        + dyn_compact_weight * dyn_compact_penalty
         + compact_pol_weight * compact_pol_penalty
         + pol_support_weight * support_penalty
         + pol_l1_weight * pol_l1_penalty
@@ -361,6 +379,7 @@ def polarized_loss_fn(
         "p_penalty": p_penalty,
         "flux_penalty": flux_penalty,
         "compact_penalty": compact_penalty,
+        "dyn_compact_penalty": dyn_compact_penalty,
         "compact_pol_penalty": compact_pol_penalty,
         "support_penalty": support_penalty,
         "pol_l1_penalty": pol_l1_penalty,

@@ -230,6 +230,7 @@ def polarized_train_step(
     pol_support_weight: float = 0.0,
     pol_support_tau: float = 0.05,
     pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
 ):
     """One AdamW step on a :class:`PolarizedNeuralDMD` via :func:`polarized_loss_fn`.
 
@@ -272,6 +273,7 @@ def polarized_train_step(
             pol_support_weight=pol_support_weight,
             pol_support_tau=pol_support_tau,
             pol_l1_weight=pol_l1_weight,
+            dyn_compact_weight=dyn_compact_weight,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
@@ -309,6 +311,7 @@ def polarized_train_epoch(
     pol_support_weight: float = 0.0,
     pol_support_tau: float = 0.05,
     pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
 ):
     """Scan :func:`polarized_train_step` over one epoch's batches.
 
@@ -358,6 +361,7 @@ def polarized_train_epoch(
             pol_support_weight=pol_support_weight,
             pol_support_tau=pol_support_tau,
             pol_l1_weight=pol_l1_weight,
+            dyn_compact_weight=dyn_compact_weight,
         )
         return (model, opt_state, key), (loss, aux["chi2_vis"], aux["grad_norm"])
 
@@ -456,6 +460,7 @@ def train_polarized_model(
     pol_support_weight: float = 0.0,
     pol_support_tau: float = 0.05,
     pol_l1_weight: float = 0.0,
+    dyn_compact_weight: float = 0.0,
     print_every: int = 50,
     early_stop_chi2: float | None = None,
     early_stop_epochs: int = 3,
@@ -555,6 +560,7 @@ def train_polarized_model(
                 pol_support_weight=pol_support_weight,
                 pol_support_tau=pol_support_tau,
                 pol_l1_weight=pol_l1_weight,
+                dyn_compact_weight=dyn_compact_weight,
             )
             # TRUE chi2 of the end-of-epoch model on the full data, no jitter --
             # the per-batch training chi2 is a mean over the evolving model and
