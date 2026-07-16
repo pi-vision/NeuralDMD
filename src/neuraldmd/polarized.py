@@ -112,13 +112,16 @@ class PolarizedNeuralDMD(eqx.Module):
             they leak an off-source polarized haze into the cross-hand null space
             that a soft ``p_weight``/support penalty must fight (an optimization
             barrier the penalty does not reliably clear).
-            ``"iscaled"`` (recommended) makes ``Q = I*tanh(q)``, ``U = I*tanh(u)``
-            with ``q,u`` free signed fields: ties pol to I so NO off-source haze
-            can form (support by construction) AND keeps ``q,u`` free of the
-            winding obstruction (m>=2 representable). ``P <= I`` reduces to
-            ``sqrt(q^2+u^2) <= 1``, supplied softly by ``p_weight``. This is the
-            structural fix for both failure modes; see
-            ``docs/polarization_parameterization.tex``.
+            ``"iscaled"`` makes ``Q = I*tanh(q)``, ``U = I*tanh(u)`` with ``q,u``
+            free signed fields: ties pol to I so NO off-source haze can form
+            (support by construction) AND keeps ``q,u`` free of the winding
+            obstruction (m>=2 representable). ``P <= sqrt(2) I``; residual
+            ``P <= I`` supplied softly by ``p_weight``.
+            ``"expm"`` (recommended) is the matrix-exponential form of Arras et al.
+            (2025), as in resolve: ``Q,U,V = I*tanh(p)*(q,u,v)/p`` with
+            ``p = sqrt(q^2+u^2+v^2)``. Same support + no-winding as ``iscaled`` but
+            with EXACT ``P <= I`` (``m = tanh(p) <= 1``, no ``p_weight`` needed) and
+            native Stokes V. See ``docs/polarization_parameterization.tex``.
         pol_model_kwargs : dict or None
             Overrides applied on top of ``model_kwargs`` for the polarization
             fields only (e.g. ``{"hidden_size": 128, "num_layers": 2,
@@ -134,9 +137,9 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
-        if pol_param not in ("fractional", "direct", "iscaled"):
+        if pol_param not in ("fractional", "direct", "iscaled", "expm"):
             raise ValueError(
-                f"pol_param must be 'fractional', 'direct', or 'iscaled', got {pol_param!r}"
+                f"pol_param must be 'fractional', 'direct', 'iscaled', or 'expm', got {pol_param!r}"
             )
         self.pol_param = str(pol_param)
         r_pol = r if r_pol is None else int(r_pol)
@@ -219,6 +222,37 @@ class PolarizedNeuralDMD(eqx.Module):
             if self.circ is not None:
                 v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
                 images["V"] = i_img * jnp.tanh(v_raw)
+                modes.append(v_modes)
+            return images, modes
+
+        if self.pol_param == "expm":
+            # Matrix-exponential polarization (Arras et al. 2025, as used in
+            # resolve): X = exp([[s+v, q+iu],[q-iu, s-v]]) yields
+            # Q,U,V = I * tanh(p) * (q,u,v)/p with p = sqrt(q^2+u^2+v^2). Applied on
+            # top of our (separately regularized) I field, this gives the exact
+            # matrix-exp fractional/EVPA structure: EXACT P<=I (m = tanh(p) <= 1),
+            # support (Q,U,V prop I -> 0 where I=0), and no winding (q,u,v are free
+            # fields; tanh(p)/p is smooth through p=0). Cleaner P<=I than iscaled
+            # (exact vs sqrt(2) bound) and V-capable; no p_le_i penalty required.
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
+            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            want_v = self.circ is not None
+            if want_v:
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                p_sq = q_raw**2 + u_raw**2 + v_raw**2
+            else:
+                p_sq = q_raw**2 + u_raw**2
+            p = jnp.sqrt(p_sq + 1e-12)
+            m_over_p = jnp.tanh(p) / p  # -> m/p; smooth, -> 1 as p -> 0
+            images = {"I": i_img}
+            modes = [i_modes, q_modes, u_modes, s_modes]
+            if "Q" in self.stokes:
+                images["Q"] = i_img * m_over_p * q_raw
+            if "U" in self.stokes:
+                images["U"] = i_img * m_over_p * u_raw
+            if want_v:
+                images["V"] = i_img * m_over_p * v_raw
                 modes.append(v_modes)
             return images, modes
 
