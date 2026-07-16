@@ -381,7 +381,20 @@ def polarized_train_epoch(
 
 @eqx.filter_jit
 def _eval_chi2_full(
-    model, xy, times, a, targets, sigmas, masks, frame_max, frame_min, *, basis, products
+    model,
+    xy,
+    times,
+    a,
+    targets,
+    sigmas,
+    masks,
+    frame_max,
+    frame_min,
+    *,
+    basis,
+    products,
+    bl_station_ids=None,
+    frame_indices=None,
 ):
     """True per-product chi-squared of ``model`` on the full dataset.
 
@@ -431,6 +444,10 @@ def _eval_chi2_full(
         neg_weight=0.0,
         w_sparse_weight=0.0,
         b_sparse_weight=0.0,
+        # the gains ride on the model, so the EVAL chi2 must apply them too --
+        # this is the number that drives best-checkpoint selection and early stop
+        bl_station_ids=bl_station_ids,
+        frame_indices=frame_indices,
     )
     return aux["chi2_vis"]
 
@@ -519,6 +536,10 @@ def train_polarized_model(
     xy_eval = jnp.asarray(loader.pixel_coords)
     t_eval = jnp.asarray(loader.times)
     a_eval = jnp.asarray(loader.op.A)
+    bl_eval = (
+        jnp.asarray(loader.op.bl_station_ids) if loader.op.bl_station_ids is not None else None
+    )
+    fidx_eval = jnp.arange(len(loader.times))
     tgt_eval = {k: jnp.asarray(loader.op.targets[k]) for k in hist_keys}
     sig_eval = {k: jnp.asarray(loader.op.sigmas[k]) for k in hist_keys}
     msk_eval = {k: jnp.asarray(loader.op.masks[k]) for k in hist_keys}
@@ -584,6 +605,8 @@ def train_polarized_model(
                 frame_min,
                 basis=basis,
                 products=products,
+                bl_station_ids=bl_eval,
+                frame_indices=fidx_eval,
             )
             eval_chi2 = {k: float(eval_chi2[k]) for k in hist_keys}
             history["total"].append(float(loss))
@@ -642,6 +665,8 @@ def train_polarized_model(
         frame_min,
         basis=basis,
         products=products,
+        bl_station_ids=bl_eval,
+        frame_indices=fidx_eval,
     )
     restored_max = float(max(float(v) for v in restored_chi2.values()))
     print(f"Best checkpoint (max chi2 {best_metric:.3f}) restored from {ckpt_path}", flush=True)

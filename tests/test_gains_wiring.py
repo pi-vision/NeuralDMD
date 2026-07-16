@@ -160,3 +160,57 @@ def test_closure_phases_are_gain_invariant():
         "closure phases moved under a pure station-gain change -- gains are not being "
         "applied as g_i conj(g_j)"
     )
+
+
+def test_train_polarized_model_runs_with_gains_attached(tmp_path):
+    """A real mini-train with gains attached must run end-to-end.
+
+    Regression: `_eval_chi2_full` -- which computes the chi2 that drives
+    best-checkpoint selection and early stopping -- called `polarized_loss_fn`
+    WITHOUT bl_station_ids/frame_indices, so an attached gain table hit
+    `jnp.array(None)` and the run died. Worse than a crash would have been the
+    silent version: evaluating an UN-gained model and checkpointing on it.
+    The unit tests above all called polarized_loss_fn directly and passed the ids
+    explicitly, so none of them exercised the eval path.
+    """
+    import numpy as np_
+
+    from neuraldmd.data.loader import PolarizedDMDDataLoader
+    from neuraldmd.data.observations import ObsProducts
+    from neuraldmd.training import train_polarized_model
+
+    rng = np_.random.default_rng(0)
+    t, m, npix, nst = 6, 5, 8, 3
+    pix = npix * npix
+    A = (rng.normal(size=(t, m, pix)) + 1j * rng.normal(size=(t, m, pix))).astype("c8")
+    tgt = {k: (rng.normal(size=(t, m)) + 1j * rng.normal(size=(t, m))).astype("c8") for k in P}
+    op = ObsProducts(
+        A,
+        P,
+        tgt,
+        {k: np_.ones((t, m), "f4") for k in P},
+        {k: np_.ones((t, m), "f4") for k in P},
+        bl_station_ids=rng.integers(0, nst, size=(t, m, 2)).astype(np_.int32),
+        stations=("AA", "AP", "AZ"),
+        times=np_.linspace(0, 0.9, t).astype("f4"),
+    )
+    loader = PolarizedDMDDataLoader(op, npix=npix, batch_size=2, epochs=2)
+    model = PolarizedNeuralDMD(S, r=2, key=jax.random.PRNGKey(0), **MODEL_KW)
+    model = with_gains(model, StationGains(n_stations=nst, n_times=t, n_hands=2, use_phase=True))
+
+    model, hist = train_polarized_model(
+        model,
+        loader,
+        num_epochs=2,
+        key=jax.random.PRNGKey(1),
+        initial_lr=1e-3,
+        models_dir=str(tmp_path),
+        frame_max={s: 1.0 for s in S},
+        frame_min={s: 0.0 for s in S},
+        basis="circular",
+        products=P,
+        early_stop_chi2=None,
+        print_every=1000,
+    )
+    assert model.gains is not None, "gains fell off the model during training"
+    assert all(np.isfinite(v) for k in P for v in hist["chi2"][k]), "eval chi2 went non-finite"
