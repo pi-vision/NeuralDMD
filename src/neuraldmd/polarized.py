@@ -117,11 +117,18 @@ class PolarizedNeuralDMD(eqx.Module):
             (support by construction) AND keeps ``q,u`` free of the winding
             obstruction (m>=2 representable). ``P <= sqrt(2) I``; residual
             ``P <= I`` supplied softly by ``p_weight``.
-            ``"expm"`` (recommended) is the matrix-exponential form of Arras et al.
-            (2025), as in resolve: ``Q,U,V = I*tanh(p)*(q,u,v)/p`` with
-            ``p = sqrt(q^2+u^2+v^2)``. Same support + no-winding as ``iscaled`` but
-            with EXACT ``P <= I`` (``m = tanh(p) <= 1``, no ``p_weight`` needed) and
-            native Stokes V. See ``docs/polarization_parameterization.tex``.
+            ``"expm"`` is the matrix-exponential fractional form of Arras et al.
+            (2025) applied on top of our I field: ``Q,U,V = I*tanh(p)*(q,u,v)/p``
+            with ``p = sqrt(q^2+u^2+v^2)``. Same support + no-winding as ``iscaled``
+            but with EXACT ``P <= I`` (``m = tanh(p) <= 1``, no ``p_weight``) and
+            native Stokes V. (P<=I only where the I field is positive.)
+            ``"expm_full"`` (recommended; exactly what resolve does) is the FULL
+            matrix exponential ``X = exp([[s+v,q+iu],[q-iu,s-v]])`` with ``s`` the
+            LOG-intensity field: ``I = e^s cosh(p)``, ``(Q,U,V) = e^s sinh(p)/p
+            (q,u,v)``. X is positive semi-definite by construction, so ``I>0`` AND
+            ``P<=I`` hold EVERYWHERE -- a physically complete coherency matrix for
+            RIME. Requires ``--no-pretrain`` (log-I is incompatible with the
+            physical-I disk pretrain). See ``docs/polarization_parameterization.tex``.
         pol_model_kwargs : dict or None
             Overrides applied on top of ``model_kwargs`` for the polarization
             fields only (e.g. ``{"hidden_size": 128, "num_layers": 2,
@@ -137,9 +144,10 @@ class PolarizedNeuralDMD(eqx.Module):
         self.stokes = cfg.stokes
         self.outshift = float(outshift)
         self.scaling_ml = float(scaling_ml)
-        if pol_param not in ("fractional", "direct", "iscaled", "expm"):
+        if pol_param not in ("fractional", "direct", "iscaled", "expm", "expm_full"):
             raise ValueError(
-                f"pol_param must be 'fractional', 'direct', 'iscaled', or 'expm', got {pol_param!r}"
+                "pol_param must be 'fractional', 'direct', 'iscaled', 'expm', or "
+                f"'expm_full', got {pol_param!r}"
             )
         self.pol_param = str(pol_param)
         r_pol = r if r_pol is None else int(r_pol)
@@ -173,6 +181,44 @@ class PolarizedNeuralDMD(eqx.Module):
         modes : list of tuple
             ``(W0, W, b0, b)`` per sub-network, for the sparsity penalty.
         """
+        if self.pol_param == "expm_full":
+            # FULL matrix-exponential brightness matrix (Arras et al. 2025; the form
+            # resolve uses). X = exp([[s+v, q+iu],[q-iu, s-v]]) with s the LOG
+            # intensity field, giving
+            #   I = e^s cosh(p),  (Q,U,V) = e^s (sinh(p)/p) (q,u,v),  p=|(q,u,v)|.
+            # Because X = exp(Hermitian) it is POSITIVE SEMI-DEFINITE by construction:
+            # I>0 EXACTLY (I is now log-parameterized -- no negativity penalty needed)
+            # AND det X = I^2 - P^2 >= 0 (P<=I) EVERYWHERE, not just where a separate
+            # I field happens to stay positive. This is the physically complete
+            # coherency matrix a correct polarized RIME (gains, D-terms, feed rotation)
+            # acts on. ``self.intensity`` supplies s (raw, O(1)); e^s is scaled by
+            # frame_max["I"] so the brightness lands in physical units, and s is
+            # clipped to avoid exp overflow (the flux anchor keeps it near 0). NB
+            # incompatible with the physical-I disk pretrain -- run with --no-pretrain.
+            s_raw, s_modes = physical_intensities(self.intensity, xy, times, 1.0, 0.0)
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
+            _, sp_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            want_v = self.circ is not None
+            if want_v:
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                p_sq = q_raw**2 + u_raw**2 + v_raw**2
+            else:
+                p_sq = q_raw**2 + u_raw**2
+            p = jnp.sqrt(p_sq + 1e-12)
+            base = frame_max["I"] * jnp.exp(jnp.clip(s_raw, -10.0, 10.0))
+            sinh_over_p = jnp.sinh(p) / p  # smooth, -> 1 as p -> 0
+            images = {"I": base * jnp.cosh(p)}
+            modes = [s_modes, q_modes, u_modes, sp_modes]
+            if "Q" in self.stokes:
+                images["Q"] = base * sinh_over_p * q_raw
+            if "U" in self.stokes:
+                images["U"] = base * sinh_over_p * u_raw
+            if want_v:
+                images["V"] = base * sinh_over_p * v_raw
+                modes.append(v_modes)
+            return images, modes
+
         i_img, i_modes = physical_intensities(
             self.intensity, xy, times, frame_max["I"], frame_min["I"]
         )
