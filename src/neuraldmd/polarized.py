@@ -64,6 +64,7 @@ class PolarizedNeuralDMD(eqx.Module):
     cos2xi: NeuralDMD
     sin2xi: NeuralDMD
     circ: NeuralDMD | None
+    gains: object | None  # StationGains when solving calibration; None otherwise
     stokes: tuple[str, ...] = eqx.field(static=True)
     outshift: float = eqx.field(static=True)
     scaling_ml: float = eqx.field(static=True)
@@ -159,6 +160,10 @@ class PolarizedNeuralDMD(eqx.Module):
         self.cos2xi = NeuralDMD(r=r_pol, key=keys[2], **pol_kwargs)
         self.sin2xi = NeuralDMD(r=r_pol, key=keys[3], **pol_kwargs)
         self.circ = NeuralDMD(r=r_pol, key=keys[4], **pol_kwargs) if want_v else None
+        # Station gains are attached AFTER construction (see `with_gains`) so the
+        # sky model can be built and pretrained without knowing the array. None here
+        # means calibration is not being solved -- the M2 default.
+        self.gains = None
 
     def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
         """Physical per-Stokes image cubes and per-network modes (loss/eval interface).
@@ -336,3 +341,28 @@ class PolarizedNeuralDMD(eqx.Module):
     def replace_i_submodel(self, new_i: NeuralDMD) -> PolarizedNeuralDMD:
         """Return a copy with the Stokes-I field replaced (e.g. by a pretrained one)."""
         return eqx.tree_at(lambda m: m.intensity, self, new_i)
+
+
+def with_gains(model, gains):
+    """Attach a :class:`~neuraldmd.calibration.StationGains` to a polarized model.
+
+    Equinox modules are immutable pytrees, so this returns a copy. Because the gains
+    become a field of the model, ``eqx.filter_value_and_grad`` differentiates them
+    alongside the sky with no change to the training step: solving calibration and
+    solving the image are the same optimization.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        The sky model.
+    gains : StationGains or None
+        The gain table, or None to detach (stop solving calibration).
+
+    Returns
+    -------
+    PolarizedNeuralDMD
+        A copy carrying ``gains``.
+    """
+    import equinox as eqx
+
+    return eqx.tree_at(lambda m: m.gains, model, gains, is_leaf=lambda x: x is None)

@@ -120,7 +120,13 @@ class PolarizedDMDDataLoader:
         targets, sigmas, masks : dict of str -> ndarray
             Per-key ``(B, batch_size, M)`` visibility products, errors, masks.
         times : ndarray
-            ``(B, batch_size)`` frame times.
+            ``(B, batch_size)`` frame times (the model's normalized clock).
+        bl_station_ids : ndarray or None
+            ``(B, batch_size, M, 2)`` station ids per baseline (-1 = padding), or
+            None for hand-built datasets. Needed to index per-station gains.
+        frame_indices : ndarray
+            ``(B, batch_size)`` INTEGER frame rows, for indexing a per-time gain
+            table (``times`` is a float clock and cannot address it).
         """
         time_indices = self._time_indices[epoch % self.epochs]
         if self.shuffle:
@@ -134,6 +140,10 @@ class PolarizedDMDDataLoader:
             return sel.reshape(n_batches, self.batch_size, *sel.shape[1:])
 
         times = self.times[time_indices]
+        # Station ids and INTEGER frame indices are needed to index a per-station,
+        # per-time gain table. `times` above are the model's normalized float clock
+        # and cannot address the gain table; `time_indices` are the frame rows.
+        bl = batched(self.op.bl_station_ids) if self.op.bl_station_ids is not None else None
         return (
             self.pixel_coords,
             batched(self.op.A),
@@ -141,6 +151,8 @@ class PolarizedDMDDataLoader:
             {k: batched(self.op.sigmas[k]) for k in self.keys},
             {k: batched(self.op.masks[k]) for k in self.keys},
             times.reshape(n_batches, self.batch_size),
+            bl,
+            np.asarray(time_indices).reshape(n_batches, self.batch_size),
         )
 
 

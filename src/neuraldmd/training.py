@@ -215,6 +215,8 @@ def polarized_train_step(
     frame_max,
     frame_min,
     *,
+    bl_station_ids=None,
+    frame_indices=None,
     freeze_intensity: bool = False,
     pol_scale=1.0,
     basis: str = "stokes",
@@ -274,6 +276,8 @@ def polarized_train_step(
             pol_support_tau=pol_support_tau,
             pol_l1_weight=pol_l1_weight,
             dyn_compact_weight=dyn_compact_weight,
+            bl_station_ids=bl_station_ids,
+            frame_indices=frame_indices,
         )
 
     (loss, aux), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
@@ -327,7 +331,7 @@ def polarized_train_epoch(
         ``mean_chi2`` is a dict keyed like the data (Stokes or product);
         ``mean_grad_norm`` is the mean global gradient norm over the epoch.
     """
-    pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b = epoch_data
+    pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b, bl_b, fidx_b = epoch_data
     keys = tuple(tgt_b.keys())
 
     def scan_fn(carry, i):
@@ -346,6 +350,8 @@ def polarized_train_epoch(
             optimizer,
             frame_max,
             frame_min,
+            bl_station_ids=None if bl_b is None else bl_b[i],
+            frame_indices=None if fidx_b is None else fidx_b[i],
             freeze_intensity=freeze_intensity,
             pol_scale=pol_scale,
             basis=basis,

@@ -40,9 +40,18 @@ def test_epoch_batch_shapes():
     """get_epoch_data returns correctly batched per-key dicts and coordinates."""
     op = _fittable_obs(npix=8, t=6, m=5)
     loader = PolarizedDMDDataLoader(op, npix=8, batch_size=2, epochs=3)
-    coords, a_b, tgt, sig, msk, times = loader.get_epoch_data(0)
+    coords, a_b, tgt, sig, msk, times, bl, fidx = loader.get_epoch_data(0)
     assert coords.shape == (64, 2)
     assert a_b.shape == (3, 2, 5, 64)  # (n_batches, batch_size, M, P)
+    # INTEGER frame rows ride along so a per-station/per-time gain table can be
+    # indexed. They must come from the SAME call: get_epoch_data reshuffles the frame
+    # order per call, so fetching them separately would desynchronize the gains from
+    # the visibilities.
+    assert fidx.shape == (3, 2)  # (n_batches, batch_size) integer frame rows
+    assert fidx.dtype.kind in "iu", "frame indices must be integers to index gains"
+    # this fixture is hand-built and carries no station ids -> None (gains need a
+    # dataset with them, e.g. anything from load_uvfits_to_products)
+    assert bl is None
     assert set(tgt) == {"I", "Q", "U"}
     for s in ("I", "Q", "U"):
         assert tgt[s].shape == sig[s].shape == msk[s].shape == (3, 2, 5)
@@ -53,7 +62,7 @@ def test_loader_serves_circular_product_keys():
     """The loader is key-agnostic: product-keyed data round-trips too."""
     op = _fittable_obs(stokes=("RR", "LL", "RL", "LR"), npix=8, t=4, m=5)
     loader = PolarizedDMDDataLoader(op, npix=8, batch_size=2, epochs=2)
-    _, _, tgt, _, _, _ = loader.get_epoch_data(0)
+    _, _, tgt, _, _, _, _, _ = loader.get_epoch_data(0)
     assert set(tgt) == {"RR", "LL", "RL", "LR"}
 
 
@@ -111,3 +120,33 @@ def test_times_roundtrip_and_loader_preference(tmp_path):
     op0 = _fittable_obs(t=6)
     loader0 = PolarizedDMDDataLoader(op0, npix=8, batch_size=2, epochs=1)
     np.testing.assert_allclose(loader0.times, np.linspace(0, 1, 6, dtype=np.float32))
+
+
+def test_epoch_data_carries_station_ids_when_present():
+    """bl_station_ids must be batched alongside the visibilities when the dataset has them.
+
+    Per-station gains are indexed by these; if they did not come from the same
+    get_epoch_data call they would be shuffled independently of the visibilities.
+    """
+    op = _fittable_obs(npix=8, t=6, m=5)
+    rng = np.random.default_rng(0)
+    op = ObsProducts(
+        op.A,
+        op.stokes,
+        op.targets,
+        op.sigmas,
+        op.masks,
+        bl_station_ids=rng.integers(-1, 3, size=(6, 5, 2)).astype(np.int32),
+        stations=("AA", "AP", "AZ"),
+    )
+    loader = PolarizedDMDDataLoader(op, npix=8, batch_size=2, epochs=3)
+    _, _, _, _, _, _, bl, fidx = loader.get_epoch_data(0)
+    assert bl is not None
+    assert bl.shape == (3, 2, 5, 2)  # (n_batches, batch_size, M, 2 stations)
+    # the station ids must correspond to the frames actually served
+    flat_bl = bl.reshape(-1, 5, 2)
+    flat_fx = fidx.reshape(-1)
+    for k in range(len(flat_fx)):
+        assert np.array_equal(flat_bl[k], op.bl_station_ids[flat_fx[k]]), (
+            "station ids are not aligned with the frame indices served in the same call"
+        )
