@@ -640,6 +640,7 @@ def generate_polarized_dataset(
     basis: str = "stokes",
     ttype: str = "direct",
     seed: int = 42,
+    truth_model: str = "mring_hs",
     save_truth: bool = True,
     **mring_kwargs,
 ):
@@ -693,15 +694,31 @@ def generate_polarized_dataset(
     array_dir = Path(array_dir) if array_dir is not None else Path(__file__).parent / "arrays"
     array = eh.array.load_txt(str(array_dir / f"{array_name}.txt"))
 
-    movie = make_mring_hs_pol_movie(
-        npix=npix,
-        fov_uas=fov_uas,
-        num_frames=num_frames,
-        tstart_hr=tstart_hr,
-        tstop_hr=tstop_hr,
-        linpol_frac=linpol_frac,
-        **mring_kwargs,
-    )
+    if truth_model == "varbeta2":
+        # rotating-EVPA ring: Stokes I static, beta2's PHASE turns 2*pi every
+        # 2*varbeta_period_hr. Tests polarization DYNAMICS, which mring_hs (a
+        # static spiral) cannot. Score with evaluation.beta2_dynamics_error --
+        # the time-averaged beta2 cancels a rotating swirl.
+        from .movies import make_varbeta2_movie
+
+        movie = make_varbeta2_movie(
+            npix=npix,
+            fov_uas=fov_uas,
+            num_frames=num_frames,
+            tstart_hr=tstart_hr,
+            tstop_hr=tstop_hr,
+            linpol_frac=linpol_frac,
+        )
+    else:
+        movie = make_mring_hs_pol_movie(
+            npix=npix,
+            fov_uas=fov_uas,
+            num_frames=num_frames,
+            tstart_hr=tstart_hr,
+            tstop_hr=tstop_hr,
+            linpol_frac=linpol_frac,
+            **mring_kwargs,
+        )
 
     tadv = float((tstop_hr - tstart_hr) * 3600.0 / max(num_frames - 1, 1))
     obs = movie.observe(

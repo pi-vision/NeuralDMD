@@ -46,6 +46,14 @@ def parse_args():
         help="cap on temporal mode frequency (x t_scale=200 rad over the window); set "
         "below the scan Nyquist to prevent inter-scan flux ringing",
     )
+    ap.add_argument(
+        "--truth-model",
+        default="mring_hs",
+        choices=["mring_hs", "varbeta2"],
+        help="synthetic truth: 'mring_hs' (static spiral EVPA + orbiting hot spot) or "
+        "'varbeta2' (rotating EVPA; beta2's phase turns 2pi every 2.67 hr) -- the "
+        "latter tests polarization DYNAMICS, which mring_hs cannot",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--reuse-data", action="store_true", help="Reuse an existing data/ obs_dir")
     # external observation mode: fit a provided uvfits (e.g. the on-sky synthetic
@@ -265,6 +273,7 @@ def main():
             stokes=stokes,
             basis=args.basis,
             seed=args.seed,
+            truth_model=args.truth_model,
         )
     print(f"Dataset keys={op.stokes}  A={op.A.shape}", flush=True)
 
@@ -457,6 +466,10 @@ def main():
     beta2_truth_abs = abs(
         ev.beta2_coefficient(truth_cubes["Q"], truth_cubes["U"], truth_cubes["I"], args.fov_uas)
     )
+    # beta2 DYNAMICS: does the recon track a *rotating* swirl frame by frame? The
+    # time-averaged beta2 above cancels a rotating EVPA (it reports ~0.01 for a
+    # perfect varbeta2 fit), so a dynamic-pol truth must be scored per frame.
+    beta2_dyn = ev.beta2_dynamics_error(recon, truth_cubes, args.fov_uas)
     beta2_recon_abs = abs(ev.beta2_coefficient(recon["Q"], recon["U"], recon["I"], args.fov_uas))
     # beam-restored metrics: the data only constrain structure to ~the array
     # resolution, so also compare after blurring both cubes to a common beam
@@ -567,6 +580,7 @@ def main():
         "nrmse_blurred": nrmse_b,
         "evpa_error_deg_blurred": evpa_err_b,
         "beta2_truth_abs": float(beta2_truth_abs),
+        "beta2_dynamics": beta2_dyn,
         "beta2_recon_abs": float(beta2_recon_abs),
         "gate": {
             # [0.4, 2]: the achievable floor here is ~0.42, not 1.0 -- generation
