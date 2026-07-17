@@ -520,7 +520,7 @@ def beta2_dynamics_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
 def beta2_error(recon, truth, fov_uas, rmin_uas=10.0, rmax_uas=34.0):
     """``(|beta2|_recon/|beta2|_truth, angle(beta2) error [deg])`` for the m=2 mode.
 
-    The EHT/KINE-standard global EVPA metric: the amplitude ratio says how much of
+    The EHT-standard global EVPA metric: the amplitude ratio says how much of
     the true m=2 polarized swirl was recovered, and the wrapped phase error gives
     its orientation error -- both robust to the local pixel-EVPA scatter that
     ``evpa_error_deg`` reports. ``beta2`` of the truth on this ring is ~0.18.

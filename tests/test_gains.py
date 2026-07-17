@@ -6,7 +6,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from neuraldmd.calibration import PRODUCT_HANDS, StationGains
+from neuraldmd.calibration import (
+    EHT_GAIN_PRIORS,
+    PRODUCT_HANDS,
+    StationGains,
+    eht_amp_bounds,
+)
 
 
 def _random_vis(t, m, seed=0):
@@ -231,3 +236,134 @@ def test_gradient_matches_finite_differences():
                 )
     finally:
         jax.config.update("jax_enable_x64", False)
+
+
+def test_per_station_bounds_are_applied_per_station():
+    """Each station is bounded by ITS OWN (lo, hi), not a shared pair."""
+    bounds = ((0.97, 1.03), (0.85, 1.15), (0.90, 1.10))
+    g = StationGains(3, 2, amp_bounds=bounds)
+    # saturate every station high, then low; each must land on its own bound
+    hi = np.asarray(_set(g, amp_raw=jnp.full((3, 2, 1), 25.0)).amplitudes())
+    lo = np.asarray(_set(g, amp_raw=jnp.full((3, 2, 1), -25.0)).amplitudes())
+    for i, (blo, bhi) in enumerate(bounds):
+        np.testing.assert_allclose(hi[i], np.float32(bhi), rtol=0, atol=1e-6)
+        np.testing.assert_allclose(lo[i], np.float32(blo), rtol=0, atol=1e-6)
+    # a tight station must NOT be able to reach a loose station's range
+    assert hi[0].max() < bounds[1][1] - 0.1  # ALMA-like cannot reach LMT-like 1.15
+
+
+def test_per_station_bounds_still_init_to_unit_gain():
+    """Unit-gain init holds per station even with different bounds (asymmetric too)."""
+    bounds = ((0.97, 1.03), (0.85, 1.15), (0.5, 2.0), (0.99, 1.5))
+    g = StationGains(4, 3, n_hands=2, amp_bounds=bounds)
+    np.testing.assert_allclose(np.asarray(g.amplitudes()), 1.0, rtol=1e-6)
+
+
+def test_scalar_bounds_broadcast_unchanged():
+    """A scalar (lo, hi) still applies to every station (back-compat)."""
+    g = StationGains(4, 2, amp_bounds=(0.9, 1.1))
+    assert g.amp_bounds == ((0.9, 1.1),) * 4
+    hi = np.asarray(_set(g, amp_raw=jnp.full((4, 2, 1), 25.0)).amplitudes())
+    np.testing.assert_allclose(hi, np.float32(1.1), rtol=0, atol=1e-6)
+
+
+def test_per_station_bounds_length_must_match():
+    """A per-station table of the wrong length is rejected, not silently reused."""
+    with pytest.raises(ValueError, match="entries for"):
+        StationGains(3, 2, amp_bounds=((0.9, 1.1), (0.9, 1.1)))
+
+
+def test_per_station_bounds_must_each_bracket_one():
+    """One bad station is caught, and named."""
+    with pytest.raises(ValueError, match="station 1"):
+        StationGains(2, 2, amp_bounds=((0.9, 1.1), (1.05, 1.2)))
+
+
+def test_eht_bounds_lookup_is_by_name_and_flags_unknown():
+    """Known stations get their numbers; unknown ones get the default, not a crash."""
+    b = eht_amp_bounds(["ALMA", "LMT", "PV", "NOSUCH"], default=(0.8, 1.2))
+    assert b[0] == (0.97, 1.03)  # ALMA: tight
+    assert b[1] == (0.85, 1.15)  # LMT: loosest real station
+    assert b[3] == (0.8, 1.2)  # unknown -> default
+    assert eht_amp_bounds(["alma"])[0] == (0.97, 1.03)  # case-insensitive
+
+
+# The real April-11 Sgr A* caltable (ehteval/caltable_april11), per station:
+# the observed min/max |g| across both hands and all times. The priors exist to
+# bound a fit against reality, so reality must fit inside them -- a hard clip that
+# excludes the truth measures the clip. These numbers are why APEX and JCMT are
+# widened relative to a flat +-3%.
+_CALTABLE_APRIL11_OBSERVED = {
+    "ALMA": (0.989, 1.006),
+    "APEX": (0.958, 1.030),
+    "SMT": (0.963, 1.046),
+    "JCMT": (0.960, 1.014),
+    "LMT": (0.976, 1.046),
+    "SMA": (0.995, 1.004),
+    "SPT": (0.943, 1.029),
+}
+
+
+@pytest.mark.parametrize("station", sorted(_CALTABLE_APRIL11_OBSERVED))
+def test_priors_contain_the_real_april11_gains(station):
+    """Every prior must contain the gains actually observed on sky, or a fit under it
+    rails at the clip. This is the check that caught APEX/JCMT being too tight at +-3%."""
+    lo, hi = EHT_GAIN_PRIORS[station]
+    obs_lo, obs_hi = _CALTABLE_APRIL11_OBSERVED[station]
+    assert lo < obs_lo, f"{station}: prior floor {lo} excludes observed {obs_lo}"
+    assert hi > obs_hi, f"{station}: prior ceil {hi} excludes observed {obs_hi}"
+
+
+def test_priors_are_far_tighter_than_the_old_global_box():
+    """The whole point: every station is much tighter than the (0.5, 2.0) that let the
+    global scale float. Loosest prior must still be a big improvement."""
+    widths = [hi - lo for lo, hi in EHT_GAIN_PRIORS.values()]
+    assert max(widths) <= 0.30, "loosest prior wider than +-15%"
+    assert max(widths) < (2.0 - 0.5) / 4, "priors not meaningfully tighter than the old box"
+
+
+def test_tight_bounds_forbid_the_measured_global_scale():
+    """The degeneracy we measured (a 1.153 global gain scale) must be UNREACHABLE
+    under physical bounds -- that is the whole point of the per-station prior."""
+    stations = ["ALMA", "PV", "LMT", "APEX", "SMA", "JCMT", "SMT", "SPT"]
+    g = StationGains(8, 2, n_hands=2, amp_bounds=eht_amp_bounds(stations))
+    amp_max = np.asarray(_set(g, amp_raw=jnp.full((8, 2, 2), 25.0)).amplitudes())
+    # even fully saturated, the array-median gain cannot reach 1.153
+    assert np.median(amp_max) < 1.153
+    # and the four well-calibrated stations cannot individually reach it either
+    for i, n in enumerate(stations):
+        if n in ("ALMA", "APEX", "SMA", "JCMT"):
+            assert amp_max[i].max() < 1.153, f"{n} can still reach the degenerate scale"
+
+
+def test_bounds_are_static_so_a_reload_with_wrong_bounds_is_silently_wrong():
+    """amp_bounds is a static field: serialise/deserialise round-trips amp_raw but NOT
+    the bounds. Reconstructing with different bounds therefore decodes the same raw to
+    DIFFERENT amplitudes, with no error raised -- which is why the resolved bounds must
+    be persisted alongside the checkpoint."""
+    import io
+
+    truth = StationGains(2, 2, amp_bounds=((0.97, 1.03), (0.85, 1.15)))
+    truth = _set(truth, amp_raw=jnp.full((2, 2, 1), 1.5))
+    want = np.asarray(truth.amplitudes())
+
+    buf = io.BytesIO()
+    eqx.tree_serialise_leaves(buf, truth)
+
+    # reload with the CORRECT bounds -> identical
+    buf.seek(0)
+    good = eqx.tree_deserialise_leaves(
+        buf, StationGains(2, 2, amp_bounds=((0.97, 1.03), (0.85, 1.15)))
+    )
+    np.testing.assert_allclose(np.asarray(good.amplitudes()), want, rtol=1e-6)
+
+    # reload with the WRONG bounds -> different amplitudes, and NO exception
+    buf.seek(0)
+    bad = eqx.tree_deserialise_leaves(buf, StationGains(2, 2, amp_bounds=(0.5, 2.0)))
+    got = np.asarray(bad.amplitudes())
+    assert not np.allclose(got, want, rtol=1e-3), (
+        "wrong bounds must change the decoded amplitude -- if this ever passes, the "
+        "silent-misread hazard is gone and the persistence dance can be simplified"
+    )
+    # and quantify: this is how badly a mis-set bound misreports a gain
+    assert abs(got[0, 0, 0] - want[0, 0, 0]) > 0.1

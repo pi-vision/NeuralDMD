@@ -15,6 +15,8 @@ global phase degeneracy.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -28,6 +30,84 @@ PRODUCT_HANDS: dict[str, tuple[int, int]] = {
     "RL": (0, 1),
     "LR": (1, 0),
 }
+
+#: Per-station gain-amplitude bounds reflecting real EHT calibration quality.
+#:
+#: A single global bound makes every station equally free, which leaves the overall
+#: gain scale unconstrained: it is degenerate with total source flux, so the fit
+#: slides along that direction (measured: a 1.153 global scale with the source flux
+#: collapsing to compensate). Well-calibrated stations pin the scale, and that only
+#: works if their bounds actually say they are well calibrated.
+#:
+#: Bounds are set per station from that station's known calibration quality, and are
+#: validated against the gains actually observed on sky: the April-11 Sgr A* caltable
+#: (``ehteval/caltable_april11``) gives, across both hands and all times,
+#:
+#:     ALMA 0.989-1.006   SMA 0.995-1.004   JCMT 0.960-1.014   APEX 0.958-1.030
+#:     LMT  0.976-1.046   SMT 0.963-1.046   SPT  0.943-1.029
+#:
+#: (1.55% rms deviation from unity overall). Because the bound is a hard sigmoid clip,
+#: a bound that excludes the truth makes the fit measure the clip rather than the gain
+#: -- so every entry here contains the observed range with margin, and errs loose.
+#: ``tests/test_gains.py`` asserts exactly that, per station.
+#:
+#: PV and SMAR do not appear in that caltable; their 10% is a moderate default.
+EHT_GAIN_PRIORS: dict[str, tuple[float, float]] = {
+    "ALMA": (0.97, 1.03),  # best-calibrated; observed 0.989-1.006
+    "SMA": (0.97, 1.03),  # observed 0.995-1.004
+    "APEX": (0.94, 1.06),  # observed down to 0.958 -- needs more than +-3%
+    "JCMT": (0.94, 1.06),  # observed down to 0.960 -- needs more than +-3%
+    "SPT": (0.94, 1.06),  # observed 0.943-1.029
+    "SMT": (0.90, 1.10),  # observed 0.963-1.046
+    "LMT": (0.85, 1.15),  # the known-worst EHT station; observed 0.976-1.046
+    "PV": (0.90, 1.10),  # not in the caltable; default
+    "SMAR": (0.90, 1.10),  # SMA reference antenna; pinned to 1.000 in the caltable
+}
+
+
+def eht_amp_bounds(
+    stations: Sequence[str], default: tuple[float, float] = (0.90, 1.10)
+) -> tuple[tuple[float, float], ...]:
+    """Look up per-station amplitude bounds for an array, by station name.
+
+    Parameters
+    ----------
+    stations : sequence of str
+        Station names, in the order the gain table is indexed.
+    default : tuple of float, optional
+        Bounds for any station absent from :data:`EHT_GAIN_PRIORS`.
+
+    Returns
+    -------
+    tuple of tuple of float
+        ``(lo, hi)`` per station, ready to pass as ``amp_bounds``.
+    """
+    return tuple(EHT_GAIN_PRIORS.get(str(s).upper(), default) for s in stations)
+
+
+def _normalize_amp_bounds(
+    amp_bounds: tuple[float, float] | Sequence[tuple[float, float]], n_stations: int
+) -> tuple[tuple[float, float], ...]:
+    """Coerce scalar or per-station bounds to one ``(lo, hi)`` per station."""
+    flat_pair = len(amp_bounds) == 2 and all(
+        isinstance(b, (int, float, np.floating)) for b in amp_bounds
+    )
+    if flat_pair:
+        pairs = [(float(amp_bounds[0]), float(amp_bounds[1]))] * n_stations
+    else:
+        if len(amp_bounds) != n_stations:
+            raise ValueError(
+                f"amp_bounds has {len(amp_bounds)} entries for {n_stations} stations; "
+                "pass a single (lo, hi) or one pair per station"
+            )
+        pairs = [(float(b[0]), float(b[1])) for b in amp_bounds]
+    for i, (lo, hi) in enumerate(pairs):
+        if not (lo < 1.0 < hi):
+            raise ValueError(
+                f"amp_bounds must strictly bracket 1 so the fit starts at unit gain; "
+                f"station {i} has {(lo, hi)}"
+            )
+    return tuple(pairs)
 
 
 class StationGains(eqx.Module):
@@ -60,7 +140,8 @@ class StationGains(eqx.Module):
     ----------
     amp_raw : jax.Array
         ``(n_stations, n_times, n_hands)`` unconstrained amplitude parameters,
-        initialized so that the amplitude is exactly 1.
+        initialized so that the amplitude is exactly 1 for every station,
+        whatever its individual bounds.
     phase : jax.Array or None
         ``(n_stations, n_times, n_hands)`` phases in radians, initialized to 0,
         or ``None`` when ``use_phase`` is ``False``.
@@ -76,7 +157,7 @@ class StationGains(eqx.Module):
     phase: jax.Array | None
     n_stations: int = eqx.field(static=True)
     n_hands: int = eqx.field(static=True)
-    amp_bounds: tuple[float, float] = eqx.field(static=True)
+    amp_bounds: tuple[tuple[float, float], ...] = eqx.field(static=True)
     ref_station: int = eqx.field(static=True)
 
     def __init__(
@@ -86,33 +167,38 @@ class StationGains(eqx.Module):
         *,
         n_hands: int = 1,
         use_phase: bool = False,
-        amp_bounds: tuple[float, float] = (0.9, 1.1),
+        amp_bounds: tuple[float, float] | Sequence[tuple[float, float]] = (0.9, 1.1),
         ref_station: int = 0,
     ):
-        lo, hi = float(amp_bounds[0]), float(amp_bounds[1])
-        if not (lo < 1.0 < hi):
-            raise ValueError(f"amp_bounds must strictly bracket 1, got {(lo, hi)}")
         if n_hands not in (1, 2):
             raise ValueError(f"n_hands must be 1 or 2, got {n_hands}")
+        bounds = _normalize_amp_bounds(amp_bounds, int(n_stations))
         self.n_stations = int(n_stations)
         self.n_hands = int(n_hands)
-        self.amp_bounds = (lo, hi)
+        self.amp_bounds = bounds
         self.ref_station = int(ref_station)
-        # sigmoid(raw0) = (1 - lo) / (hi - lo)  =>  amplitude(raw0) = 1 exactly
-        raw0 = float(np.log((1.0 - lo) / (hi - 1.0)))
-        self.amp_raw = jnp.full((n_stations, n_times, n_hands), raw0)
+        # sigmoid(raw0) = (1 - lo) / (hi - lo)  =>  amplitude(raw0) = 1 exactly,
+        # per station, so a tight-bound station still starts at unit gain.
+        lo = np.array([b[0] for b in bounds])
+        hi = np.array([b[1] for b in bounds])
+        raw0 = np.log((1.0 - lo) / (hi - 1.0))
+        self.amp_raw = jnp.asarray(
+            np.broadcast_to(raw0[:, None, None], (n_stations, n_times, n_hands)).copy(),
+            dtype=jnp.float32,
+        )
         self.phase = jnp.zeros((n_stations, n_times, n_hands)) if use_phase else None
 
     def amplitudes(self) -> jax.Array:
-        """Return the per-station gain amplitudes, sigmoid-bounded in ``amp_bounds``.
+        """Return the per-station gain amplitudes, sigmoid-bounded per station.
 
         Returns
         -------
         jax.Array
-            ``(n_stations, n_times, n_hands)`` real amplitudes strictly inside
-            ``(amp_bounds[0], amp_bounds[1])``, with nonzero gradient everywhere.
+            ``(n_stations, n_times, n_hands)`` real amplitudes strictly inside each
+            station's own ``(lo, hi)``, with nonzero gradient everywhere.
         """
-        lo, hi = self.amp_bounds
+        lo = jnp.asarray([b[0] for b in self.amp_bounds]).reshape(-1, 1, 1)
+        hi = jnp.asarray([b[1] for b in self.amp_bounds]).reshape(-1, 1, 1)
         return lo + (hi - lo) * jax.nn.sigmoid(self.amp_raw)
 
     def phases(self) -> jax.Array:

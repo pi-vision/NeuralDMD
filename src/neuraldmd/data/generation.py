@@ -26,6 +26,8 @@ from astropy import units as u
 from ehtim.imaging.imager_utils import chisqdata
 from skimage.transform import resize
 
+from .seeding import ehtim_seed
+
 
 @dataclass
 class Config:
@@ -746,7 +748,7 @@ def generate_polarized_dataset(
         add_th_noise=True,
         ampcal=ampcal,
         phasecal=phasecal,
-        seed=seed,
+        seed=ehtim_seed(seed),
         verbose=False,
     )
     if fractional_noise:
