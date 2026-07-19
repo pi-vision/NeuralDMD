@@ -1,4 +1,4 @@
-"""Evaluation and visualization helpers for the Fourier tutorial."""
+"""Evaluation and visualization helpers (modes, spectrum, movies, chi-squared)."""
 
 import os
 

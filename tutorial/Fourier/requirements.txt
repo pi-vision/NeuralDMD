@@ -1,4 +1,5 @@
 # --- training + evaluation (notebooks 02-04) ---
+# installed automatically by `pip install -e ../..` (the neuraldmd package):
 jax>=0.4.30            # add [cuda12] for GPU, see main README
 equinox>=0.11
 optax>=0.2

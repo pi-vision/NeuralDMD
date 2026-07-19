@@ -14,21 +14,38 @@ by sharing spatial modes and a global temporal spectrum across all frames.
 | 3 | [03_train.ipynb](03_train.ipynb) | Train on the complex visibilities | JAX | ~30–45 min GPU |
 | 4 | [04_evaluate.ipynb](04_evaluate.ipynb) | Modes, spectrum, reconstruction, χ², forecasting | JAX | ~1 min |
 
+**Setup**: notebooks 02–04 import the `neuraldmd` package — install it once
+into your JAX environment from the repo root:
+
+```bash
+pip install -e .
+```
+
 Data generation (ehtim) and training (JAX) have conflicting dependency
 habits, so the tutorial is split so each notebook needs only one of the two —
 see `requirements.txt` for both dependency sets. All outputs land in `./data`,
 `./models`, and `./plots` (gitignored).
 
-## Library files
+## Code map
 
-- `neural_dmd.py` — model (spatial ResidualMLP + temporal latent nets, gauge
-  fixing), visibility-χ² loss, jitted training loop
-- `dmd_data_loader.py` — batches the per-frame observation products
-- `zernike_bank.py` — complex Zernike basis on a disk (masked-QR orthonormal)
-- `pretraining.py` — radius-of-gyration sizing + Zernike alignment pretraining
-- `make_movie.py` — m-ring + orbiting hot spot synthesizer
-- `util_funcs.py` — evaluation: mode plots, unit-circle spectrum, GIF/MP4
-  export, full-dataset χ²
+The core library lives in the [`neuraldmd` package](../../neuraldmd/):
+
+- `neuraldmd.model` — NeuralDMD architecture (spatial ResidualMLP + temporal
+  latent nets, gauge fixing)
+- `neuraldmd.training` — visibility-χ² loss, jitted training loop, early
+  stopping at the noise level
+- `neuraldmd.loader` — `DMDDataLoader`, batches the per-frame observation
+  products
+- `neuraldmd.zernike` — complex Zernike basis on a disk (masked-QR orthonormal)
+- `neuraldmd.pretraining` — radius-of-gyration sizing + Zernike alignment
+  pretraining
+- `neuraldmd.evaluation` — mode plots, unit-circle spectrum, GIF/MP4 export,
+  full-dataset χ²
+
+Local to this tutorial:
+
+- `make_movie.py` — m-ring + orbiting hot spot synthesizer (needs ehtim,
+  notebook 01 only)
 
 Dataset formats and observation-generation details live in
 [`eht2017/`](../../eht2017/).

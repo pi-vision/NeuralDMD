@@ -1,3 +1,6 @@
+# Tutorial dependencies. The core library installs via `pip install -e .` (see pyproject.toml);
+# this file adds the tutorial-only extras.
+
 # core (training / evaluation)
 jax>=0.4.30
 equinox

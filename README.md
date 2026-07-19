@@ -10,37 +10,51 @@ Key features
 
 - Train on CPU or GPU through JAX (CUDA 12 supported)
 
-Requirements
-----------------------
-See requirements.txt for the full list. The Fourier tutorial uses two dependency sets (ehtim for data generation, JAX for training) — see tutorial/Fourier/requirements.txt.
-
 Installation
+----------------------
+NeuralDMD is a pip-installable package (`neuraldmd`):
 
-```# clone
-git clone git@github.com:as2c/NeuralDMD.git
+```bash
+# from GitHub, no clone needed
+pip install "git+https://github.com/pi-vision/NeuralDMD.git"
+
+# or, for the tutorials / development
+git clone git@github.com:pi-vision/NeuralDMD.git
 cd NeuralDMD
-
-# (optional) virtual environment
-python -m venv .neuraldmd_env
-source .neuraldmd_env/bin/activate              # Windows: .venv\Scripts\activate
-
-# core dependencies
-pip install -r requirements.txt
+pip install -e .
 
 # GPU acceleration
 pip install "jax[cuda12]"
+
+# extras: observation generation (ehtim) / mp4 export
+pip install -e ".[obs]"     # ehtim + astropy + scikit-image
+pip install -e ".[video]"   # imageio-ffmpeg
 ```
+
+```python
+from neuraldmd import NeuralDMD, train_model, DMDDataLoader
+from neuraldmd import zernike, pretraining, evaluation
+```
+
+The Fourier tutorial uses two dependency sets (ehtim for data generation, JAX for training) — see tutorial/Fourier/README.md.
 
 Repository layout
 
 ```
 NeuralDMD/
+ ├─ neuraldmd/            # the pip-installable core library
+ │   ├─ model.py          #   NeuralDMD architecture (spatial + temporal nets)
+ │   ├─ training.py       #   visibility-chi2 loss, jitted training loop, early stopping
+ │   ├─ loader.py         #   DMDDataLoader for observation products
+ │   ├─ zernike.py        #   complex Zernike basis on a disk
+ │   ├─ pretraining.py    #   disk-template initialization
+ │   └─ evaluation.py     #   mode/spectrum plots, movies, chi-squared
  ├─ tutorial/
  │   ├─ pixel/            # sparse-pixel experiment (Apr 1–7 2025 weather data)
  │   └─ Fourier/          # sparse-visibility experiment: EHT 2017 imaging of
  │                        # an orbiting hot spot (data → pretrain → train → evaluate)
  ├─ eht2017/              # EHT 2017 observation pipeline + data-format reference
- └─ requirements.txt
+ └─ pyproject.toml
 ```
 
 Quick start

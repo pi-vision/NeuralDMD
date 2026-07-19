@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuraldmd"
+version = "1.0.0"
+description = "Neural Dynamic Modes: computational imaging of dynamical systems from sparse observations"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Ali SaraerToosi", email = "asaraert@cs.toronto.edu" },
+]
+requires-python = ">=3.10"
+keywords = [
+    "dynamic mode decomposition",
+    "neural implicit fields",
+    "computational imaging",
+    "black hole imaging",
+    "interferometry",
+    "jax",
+]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "jax>=0.4.30",
+    "equinox>=0.11",
+    "optax>=0.2",
+    "numpy",
+    "h5py",
+    "matplotlib",
+    "imageio",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# observation generation (eht2017/data_generation.py, tutorial notebook 01)
+obs = ["ehtim==1.2.10", "astropy", "scikit-image"]
+# mp4 export in evaluation helpers
+video = ["imageio-ffmpeg"]
+
+[project.urls]
+Repository = "https://github.com/pi-vision/NeuralDMD"
+Paper = "https://arxiv.org/abs/2507.03094"
+
+[tool.setuptools.packages.find]
+include = ["neuraldmd*"]
