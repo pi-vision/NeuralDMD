@@ -73,9 +73,12 @@ def load_run(path: Path) -> dict | None:
             on = (harm >= 1) & (resid < 0.15 * FUNDAMENTAL_RAD_PER_HR)
             row["n_on_harmonic"] = int(on.sum())
             row["harmonics"] = sorted({int(h) for h in harm[on]})
+        # the split only says something when private modes exist; with
+        # n_shared == r everything is shared by construction
         fields = t.get("fields", {})
+        informative = int(t.get("n_shared", 0)) < int(cfg.get("r") or 0)
         for name in ("intensity", "frac"):
-            if name in fields:
+            if name in fields and informative:
                 row[f"shared_{name}"] = float(fields[name]["shared_power"])
     return row
 
