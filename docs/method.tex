@@ -5,18 +5,25 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{xspace}
 \usepackage{hyperref}
 \usepackage{tikz}
-\usetikzlibrary{positioning, arrows.meta, fit, backgrounds, calc}
+\usetikzlibrary{positioning, arrows.meta, fit, backgrounds}
 
-\newcommand{\neuralDMD}{\textsc{NeuralDMD}}
-\newcommand{\kine}{\textsc{kine}}
-\newcommand{\resolve}{\textsc{resolve}}
-\newcommand{\Stokes}{S}
+% notation follows the NeuralDMD paper (paper/main.tex)
+\newcommand{\neuralDMD}{\textsc{\small{NeuralDMD}}\xspace}
+\newcommand{\DMD}{\textsc{\small{DMD}}\xspace}
+\newcommand{\optdmd}{\textsc{\small{optDMD}}\xspace}
+\newcommand{\kine}{\textsc{\small{kine}}\xspace}
+\newcommand{\resolve}{\textsc{\small{resolve}}\xspace}
+\def\ehtim{\texttt{eht-imaging}\xspace}
 \DeclareMathOperator*{\argmin}{arg\,min}
+\newcommand{\SP}{\mathrm{S}}          % a Stokes label
+\newcommand{\tsc}{t_{\mathrm{scale}}}
 
-\title{Polarimetric \neuralDMD:\\
-       dynamical modes of a polarized black-hole movie}
+\title{Polarimetric \neuralDMD\\
+\large Dynamic modes of a polarized black-hole movie}
 \author{}
 \date{}
 
@@ -24,581 +31,731 @@
 \maketitle
 
 \begin{abstract}
-\neuralDMD{} reconstructs a black-hole movie from sparse interferometric
-visibilities as a sum of dynamic modes: a static image plus a handful of complex
-spatial modes, each rotating and decaying at its own complex frequency. This note
-extends the method to full polarization $(I,Q,U,V)$. The central design question
-is how much temporal structure the Stokes parameters should share. We answer it
-by measurement rather than assertion: the polarization fields are given access to
-a \emph{shared} bank of frequencies alongside \emph{private} modes of their own,
-and the fitted amplitudes then report how much of the polarized variability
-actually lives on the shared ladder. We also describe the calibration forward
-model (station gains applied to the model visibilities, in \resolve{} order
-rather than \kine{}'s data-side division) and the priors the objective carries,
-separating those that encode physics from those that are tuned by hand.
+\neuralDMD represents a movie as a small set of dynamic modes: a static image plus
+$r$ complex spatial modes, each oscillating and decaying at its own complex
+frequency. This note extends it to full polarization $(I,Q,U,V)$ and writes out
+the complete model. The central design question is how much temporal structure
+the Stokes parameters should share, and we answer it by measurement: the
+polarization fields are given a \emph{shared} bank of frequencies alongside
+\emph{private} modes of their own, and the fitted amplitudes then report how much
+of the polarized variability actually lives on the shared bank. We also give the
+calibration forward model and the full objective, separating the terms that
+encode physics from the ones that are tuned by hand.
 \end{abstract}
 
-\section{Background: \neuralDMD{} for Stokes $I$}
+\tableofcontents
 
-A dynamic-mode decomposition writes a linear dynamical system as a sum of
-separable space--time modes,
+\section{Background: \neuralDMD for Stokes $I$}
+
+\subsection{Modal representation}
+
+A linear dynamical system admits a modal decomposition, in which a
+spatio-temporal field is a low-rank superposition of spatial modes evolving
+independently in time,
 \begin{equation}
-  I(x,y,t) = \sum_{j=1}^{r} w_j(x,y)\, a_j(t),
+  I(x,y,t)=\sum_{j=1}^{r} w_j(x,y)\, a_j(t),
   \qquad a_j(t) = b_j e^{\Omega_j t},
   \label{eq:modal}
 \end{equation}
-with complex eigenvalues $\Omega_j = \alpha_j + i\omega_j$ whose real part sets
-the growth or decay rate and whose imaginary part sets the oscillation frequency.
-\neuralDMD{} makes every ingredient of Eq.~\eqref{eq:modal} the output of a small
-network: a coordinate network $\Theta_w$ maps a positionally-encoded $(x,y)$ to
-the spatial modes, and two latent-vector networks $\Theta_\Omega$ and $\Theta_b$
-produce the spectrum and the mode amplitudes. Because the image is real, the
-implementation carries $r$ \emph{complex} modes and forms
-\begin{equation}
-  \hat I(x,t) = w_0(x)\, b_0
-  \;+\; 2\,\mathrm{Re} \sum_{j=1}^{r} w_j(x)\, b_j\,
-        e^{\Omega_j t_{\mathrm{scale}} t},
-  \label{eq:dmd}
-\end{equation}
-the conjugate partners being implicit in the $2\,\mathrm{Re}[\cdot]$. Here
-$t \in [0,1]$ is normalized observation time and $t_{\mathrm{scale}} = 200$ puts
-the representable rates in a useful range. The spectrum is bounded by
-construction, $\alpha_j \le 0$ (no growing modes) and
-$\omega_j \in [\omega_{\min}, \omega_{\max}]$.
+where $w_j(x,y)$ are the spatial modes, $b_j$ are coefficients set by the initial
+state, and $\Omega_j = \alpha_j + i\omega_j$ are complex spectral coefficients
+whose real and imaginary parts encode decay rates and oscillation frequencies.
 
-Two conventions matter below. First, the scale split between $w_j$ and $b_j$ is a
-gauge; it is fixed by normalizing each mode to unit RMS over the image, with a
-stop-gradient on the norm. This is what makes the amplitudes $|b_j|$ comparable
-across modes and across Stokes parameters, and it is what makes any prior on the
-amplitude spectrum well posed. Second, the data term is a reduced
-$\chi^2$ counted per \emph{real} degree of freedom,
+\neuralDMD parameterizes every ingredient of Eq.~\eqref{eq:modal} by a network,
+with trainable weights $\Theta=[\Theta_w,\Theta_\Omega,\Theta_b]$:
 \begin{equation}
-  \chi^2 = \frac{\sum_{t,k} m_{tk}\,
-                 \bigl| V_{tk} - \hat V_{tk} \bigr|^2 / \sigma_{tk}^2}
-                {2 \sum_{t,k} m_{tk}},
+  w_j(x,y) = w_j(x,y;\Theta_w), \qquad
+  \Omega_j = \Omega_j(\Theta_\Omega), \qquad
+  b_j = b_j(\Theta_b).
+  \label{eq:params}
+\end{equation}
+The spatial modes are a coordinate MLP, so they can be evaluated at arbitrary
+$(x,y)$; the spectrum and the amplitudes come from two small networks acting on
+learned latent vectors.
+
+\subsection{Real-valued reconstruction}
+
+The field is real, so the complex modes occur in conjugate pairs and the
+reconstruction is formed from the real part of the modal sum,
+\begin{equation}
+  \hat I(x,y,t)= w_0(x,y)\,b_0
+  \;+\; 2\,\Re\!\left(\sum_{j=1}^{r} w_j(x,y)\,b_j\,e^{\Omega_j \tsc t}\right),
+  \label{eq:recon}
+\end{equation}
+where the $j=0$ term is a real static component ($\Omega_0=0$) capturing the
+time-averaged signal. Time $t$ is normalized to $[0,1]$ over the observing
+window, and the constant $\tsc$ (we use $\tsc=200$) places the representable
+rates in a useful range.
+
+\subsection{Constraints carried by the architecture}
+
+Three constraints are imposed by construction rather than by penalty.
+
+\paragraph{Bounded spectrum.} The real part is held non-positive so that no mode
+grows without bound, and the frequency is band-limited:
+\begin{equation}
+  \alpha_j = -\,\sigma(\cdot) \in [-1,0], \qquad
+  \omega_j = \omega_{\min} + \sigma(\cdot)\,(\omega_{\max}-\omega_{\min}),
+  \label{eq:spectrum_bounds}
+\end{equation}
+with $\sigma$ the logistic function applied to unconstrained network outputs.
+After the $\tsc$ scaling these correspond to $\alpha_j\in[-200,0]$ and
+$\omega_j\in[0,200]$ over the window.
+
+\paragraph{Mode gauge.} Equation~\eqref{eq:recon} is invariant under
+$w_j \to c\,w_j$, $b_j \to b_j/c$. This freedom is removed by normalizing each
+mode to unit RMS over the $P$ image pixels,
+\begin{equation}
+  \tilde w_j(x,y) = \frac{w_j(x,y)}{\big\langle |w_j|^2 \big\rangle^{1/2}},
+  \qquad
+  \big\langle |w_j|^2 \big\rangle = \frac{1}{P}\sum_{p=1}^{P} |w_j(x_p,y_p)|^2 ,
+  \label{eq:gauge}
+\end{equation}
+with the norm treated as a constant when differentiating. This is what makes the
+amplitudes $|b_j|$ comparable across modes and across Stokes parameters, and it is
+what makes any statement about the mode spectrum well posed.
+
+\paragraph{Amplitudes.} The static amplitude is kept positive and the dynamic
+amplitudes are written in polar form,
+\begin{equation}
+  b_0 = \mathrm{softplus}(\cdot), \qquad
+  b_j = \rho_j\, e^{i\phi_j},\quad
+  \rho_j = \varepsilon_b\,\mathrm{softplus}(\cdot),\quad
+  \phi_j = \pi \tanh(\cdot),
+  \label{eq:amplitudes}
+\end{equation}
+with the amplitude head zero-initialized, so training starts from a static image
+and grows dynamics only as the data demand them ($\varepsilon_b = 0.1$).
+
+\subsection{Measurement}
+
+An interferometer samples the Fourier transform of the sky. The visibility at
+baseline $(u,v)$ and time $t$ is
+\begin{equation}
+  V(u,v,t) = \mathcal{F}[I_t](u,v),
+  \label{eq:visibility}
+\end{equation}
+measured only on a sparse, time-varying set $\mathcal{S}_t=\{(u_k,v_k,t_k)\}$.
+Writing $A_t$ for the discrete operator that maps the image vector at frame $t$
+to its sampled visibilities, the model prediction is
+\begin{equation}
+  \hat V_t = A_t\, \hat I_t ,
+  \label{eq:forward}
+\end{equation}
+and the parameters are fitted by
+\begin{equation}
+  \Theta^{\star} = \argmin_{\Theta}\ \chi^2(\Theta),
+  \qquad
+  \chi^{2}(\Theta) = \frac{1}{N}\sum_{i=1}^{N}
+  \frac{\bigl|V_i-\hat V_i(\Theta)\bigr|^{2}}{\sigma_i^{2}} .
+  \label{eq:chi2_paper}
+\end{equation}
+In this work we count degrees of freedom explicitly: each complex visibility
+carries a real and an imaginary part, and flagged baselines are masked, so
+\begin{equation}
+  \chi^2 = \frac{\displaystyle\sum_{t,k} m_{tk}\,
+                 \bigl|V_{tk}-\hat V_{tk}\bigr|^2 \big/ \sigma_{tk}^2}
+                {\displaystyle 2\sum_{t,k} m_{tk}} ,
+  \qquad m_{tk}\in\{0,1\},
   \label{eq:chi2}
 \end{equation}
-where $m$ is a $0/1$ mask over baselines and the factor $2$ accounts for the real
-and imaginary parts of each complex visibility.
+so that a model fitting at the noise level gives $\chi^2\approx1$.
 
 \section{Polarization}
 
 \subsection{What has to be represented}
 
-The sky is a Stokes vector $(I,Q,U,V)$ obeying $\sqrt{Q^2+U^2+V^2} \le I$, and
-the interferometer with circular feeds measures the correlation products
+The sky is a Stokes vector $(I,Q,U,V)$ obeying, at every pixel,
 \begin{equation}
-  RR = I + V, \quad LL = I - V, \quad RL = Q + iU, \quad LR = Q - iU .
-  \label{eq:circ}
+  P \equiv \sqrt{Q^2+U^2+V^2} \;\le\; I ,
+  \label{eq:pli}
 \end{equation}
-The linear polarization is naturally a single \emph{complex} field
-$P = Q + iU$, of spin weight $2$: under a rotation of the source by an angle
-$\phi$, $I$ transforms as a scalar while $P \to e^{2i\phi} P$. The observable
-polarization angle is $\chi = \tfrac12 \arg P$.
-
-This spin weight has a direct consequence for the temporal spectrum. If a pattern
-rotates rigidly at angular rate $\Omega_{\mathrm{orb}}$, then the azimuthal
-Fourier component of order $m$ of $I$ oscillates at $m\,\Omega_{\mathrm{orb}}$,
-whereas the order-$m$ component of $P$ oscillates at
-$(m-2)\,\Omega_{\mathrm{orb}}$. Intensity and polarization therefore draw their
-frequencies from the \emph{same} harmonic ladder while weighting its rungs
-differently. A second consequence is that $P$ has a definite sense of rotation:
-its temporal spectrum is one-sided, unlike that of the real field $I$, whose
-spectrum is conjugate-symmetric by construction.
-
-\subsection{Coordinate charts}
-
-Writing $(Q,U,V)$ directly as free fields satisfies neither $P \le I$ nor the
-requirement that polarization vanish where there is no emission. We therefore
-build the polarized sky in one of several charts, all of which share the same raw
-\neuralDMD{} sub-fields and differ only in the pointwise algebra that turns them
-into Stokes parameters (Table~\ref{tab:charts}). The default \emph{fractional}
-chart is
+with polarization vanishing wherever there is no emission. A telescope with
+circular feeds measures the four correlation products
 \begin{equation}
-  Q = m_\ell\, I \cos 2\xi, \qquad
-  U = m_\ell\, I \sin 2\xi, \qquad
-  V = m_c\, I,
+  RR = I+V, \qquad LL = I-V, \qquad RL = Q+iU, \qquad LR = Q-iU ,
+  \label{eq:circular}
+\end{equation}
+so that $I=\tfrac12(RR+LL)$ and $V=\tfrac12(RR-LL)$, while the linear
+polarization appears only in the cross hands. The linear polarization is
+naturally one \emph{complex} field,
+\begin{equation}
+  \mathcal{P} \equiv Q+iU = m_\ell\,I\,e^{2i\chi},
+  \qquad \chi = \tfrac12\arg\mathcal{P} = \tfrac12\operatorname{atan2}(U,Q),
+  \label{eq:pdef}
+\end{equation}
+where $m_\ell\in[0,1]$ is the linear polarization fraction and $\chi$ the
+polarization angle (EVPA).
+
+\subsection{Spin weight, and what it implies for the spectrum}
+
+$\mathcal{P}$ has spin weight $2$: rotating the source by an angle $\varphi$
+takes $I(r,\theta)\to I(r,\theta-\varphi)$ but
+$\mathcal{P}\to e^{2i\varphi}\mathcal{P}(r,\theta-\varphi)$. Decomposing both in
+azimuthal harmonics and letting the pattern rotate rigidly at
+$\Omega_{\mathrm{orb}}$, the order-$m$ component of each field oscillates at
+\begin{equation}
+  \omega^{(I)}_m = m\,\Omega_{\mathrm{orb}},
+  \qquad
+  \omega^{(\mathcal{P})}_m = (m-2)\,\Omega_{\mathrm{orb}} .
+  \label{eq:spin2}
+\end{equation}
+Intensity and polarization therefore draw their frequencies from the \emph{same}
+harmonic ladder but weight its rungs differently --- the intensity of an orbiting
+feature peaks at the fundamental, the polarization at the second harmonic. A
+second consequence is that $\mathcal{P}$ has a definite sense of rotation, so its
+temporal spectrum is one-sided, unlike that of the real field $I$, whose spectrum
+is conjugate-symmetric by construction.
+
+\subsection{Per-Stokes fields}
+
+Each raw field is an independent \neuralDMD field of the form of
+Eq.~\eqref{eq:recon}. Writing $\SP$ for a raw field label,
+\begin{equation}
+  f^{\SP}(x,y,t) = w^{\SP}_0(x,y)\,b^{\SP}_0
+  \;+\; 2\,\Re\!\left(\sum_{j=1}^{r} w^{\SP}_j(x,y)\,b^{\SP}_j\,
+        e^{\Omega^{\SP}_j \tsc t}\right).
+  \label{eq:field}
+\end{equation}
+The Stokes parameters are then built pointwise from these fields by a chart
+(Sec.~\ref{sec:charts}). The intensity field is scaled to physical units,
+\begin{equation}
+  I(x,y,t) = f^{I}(x,y,t)\,(I_{\max}-I_{\min}) + I_{\min},
+  \label{eq:iscale}
+\end{equation}
+while the fields entering the polarization charts are used raw and bounded by
+their own activations.
+
+\subsection{Shared and private temporal modes}
+\label{sec:partition}
+
+Physics argues that the frequencies belong to the flow rather than to the
+observable, so one orbiting feature should imprint one ladder on every Stokes
+parameter. Statistics agrees: the cross hands carry a small fraction of the
+parallel-hand signal-to-noise, and frequencies are the hardest parameters to
+identify from them. But Eq.~\eqref{eq:spin2} says the \emph{weights} differ, and
+nothing guarantees that a real source has no polarization-only variability.
+
+Rather than assume an answer, we make the spectrum a partition. One designated
+field owns a bank $\Omega^{\mathrm{sh}}$, and each coupled field uses
+\begin{equation}
+  \Omega^{\SP}_j =
+  \begin{cases}
+    \Omega^{\mathrm{sh}}_j, & j < n_{\mathrm{sh}},\\[2pt]
+    \Omega^{\SP,\mathrm{own}}_j, & j \ge n_{\mathrm{sh}},
+  \end{cases}
+  \label{eq:partition}
+\end{equation}
+so $n_{\mathrm{sh}}=0$ recovers fully independent fields, $n_{\mathrm{sh}}=r$
+shares the whole bank, and anything between leaves each field private modes. The
+amplitudes $b^{\SP}_j$ are \emph{never} shared: the per-Stokes weighting of the
+harmonics, and the relative phases between Stokes parameters, are exactly the
+physical content we want to measure. Two scopes are useful --- sharing among the
+polarization fields only (they are components of one spin-2 field), or sharing
+with Stokes $I$ as well (which is what makes the mode index mean the same
+frequency in every Stokes parameter).
+
+Because private modes remain available, the fit reports whether they were needed.
+Define the shared power fraction of a field as
+\begin{equation}
+  \mathcal{R}^{\SP}
+  = \frac{\sum_{j<n_{\mathrm{sh}}} |b^{\SP}_j|^2}
+         {\sum_{j} |b^{\SP}_j|^2} \in [0,1].
+  \label{eq:sharedpower}
+\end{equation}
+A value near unity says the polarized variability lives on the intensity's
+ladder; a small value says it does not, which is a statement about the source.
+
+\subsection{Recovering physical rates}
+
+The fitted frequencies are dimensionless. With the normalized time axis spanning
+a window of $T$ hours,
+\begin{equation}
+  \omega_j^{\mathrm{phys}} = \frac{\omega_j\,\tsc}{T}
+  \quad [\mathrm{rad\,hr^{-1}}],
+  \label{eq:physfreq}
+\end{equation}
+so an orbital period $T_{\mathrm{orb}}$ appears at $2\pi/T_{\mathrm{orb}}$
+together with its harmonics. Since $\omega_j\ge0$ and the conjugate partners are
+implicit in Eq.~\eqref{eq:recon}, the \emph{sense} of rotation is not encoded in
+the spectrum: it lives in the azimuthal phase gradient of $\arg w_j$, and any
+claim about the direction of motion must be read from the spatial modes.
+
+\section{Polarization charts}
+\label{sec:charts}
+
+Free $(Q,U,V)$ fields satisfy neither Eq.~\eqref{eq:pli} nor the support
+requirement. We therefore build the polarized sky through one of five charts. All
+consume the same raw fields $f^{\SP}$ of Eq.~\eqref{eq:field}; only the pointwise
+map to Stokes differs. Below, $\sigma$ is the logistic function and $\delta$ an
+output bias that starts the source unpolarized.
+
+\paragraph{(a) \texttt{fractional}.} A polarization fraction times a unit
+direction:
+\begin{equation}
+  m_\ell = m^{\max}_\ell\,\sigma\!\left(f^{m}-\delta\right),
+  \qquad
+  (\cos2\chi,\ \sin2\chi) = \frac{(f^{c},\,f^{s})}{\sqrt{(f^{c})^2+(f^{s})^2}},
+  \label{eq:frac_dir}
+\end{equation}
+\begin{equation}
+  Q = m_\ell\,I\cos2\chi, \qquad
+  U = m_\ell\,I\sin2\chi, \qquad
+  V = m_c\,I,\quad m_c = 2\sigma\!\left(f^{v}-\delta\right)-1 .
   \label{eq:fractional}
 \end{equation}
-with $m_\ell = \sigma(\cdot)\,$ bounded in $[0, m_\ell^{\max}]$ and the direction
-$(\cos 2\xi, \sin 2\xi)$ normalized to the unit circle, so that
-$P = m_\ell |I|$ exactly.
+Because the direction is unit-normalized, $P=m_\ell|I|$ \emph{exactly}, so
+Eq.~\eqref{eq:pli} holds strictly for $m_\ell^{\max}\le1$.
+
+\paragraph{(b) \texttt{direct}.} Independent signed fields in intensity units,
+\begin{equation}
+  Q = I_{\max} f^{q}, \qquad U = I_{\max} f^{u}, \qquad V = I_{\max} f^{v},
+  \label{eq:direct}
+\end{equation}
+with no tie to $I$; Eq.~\eqref{eq:pli} and support must then be supplied by
+penalties.
+
+\paragraph{(c) \texttt{iscaled}.} Free but $I$-scaled,
+\begin{equation}
+  Q = I\tanh f^{q}, \qquad U = I\tanh f^{u}, \qquad V = I\tanh f^{v},
+  \label{eq:iscaled}
+\end{equation}
+which gives support by construction and $P\le\sqrt{3}\,I$ (for linear
+polarization alone, $P\le\sqrt2\,I$); the residual bound is left to a penalty.
+
+\paragraph{(d) \texttt{expm}.} The matrix-exponential fractional form, applied on
+top of our intensity field. With
+\begin{equation}
+  p = \sqrt{(f^{q})^2+(f^{u})^2+(f^{v})^2},
+  \label{eq:pmag}
+\end{equation}
+\begin{equation}
+  (Q,U,V) = I\,\frac{\tanh p}{p}\,\bigl(f^{q},f^{u},f^{v}\bigr).
+  \label{eq:expm}
+\end{equation}
+The fraction is $m=\tanh p\le1$, so Eq.~\eqref{eq:pli} holds \emph{exactly} with
+no penalty weight; support is inherited from the factor $I$; and
+$\tanh(p)/p$ is smooth through $p=0$, so there is no obstruction at zero
+polarization. This chart is native in Stokes $V$.
+
+\paragraph{(e) \texttt{expm\_full}.} The full coherency matrix as a matrix
+exponential,
+\begin{equation}
+  X = \exp
+  \begin{pmatrix}
+    s+f^{v} & f^{q}+if^{u} \\
+    f^{q}-if^{u} & s-f^{v}
+  \end{pmatrix},
+  \qquad
+  X = \begin{pmatrix} I+V & Q+iU \\ Q-iU & I-V \end{pmatrix},
+  \label{eq:expmfull_def}
+\end{equation}
+whose argument is Hermitian, so $X$ is positive semi-definite. Explicitly,
+\begin{equation}
+  I = e^{s}\cosh p, \qquad
+  (Q,U,V) = e^{s}\,\frac{\sinh p}{p}\,\bigl(f^{q},f^{u},f^{v}\bigr),
+  \label{eq:expmfull}
+\end{equation}
+so $I>0$ and $\det X = I^2-P^2 \ge 0$ hold \emph{everywhere} by construction. Here
+$s$ is a log-intensity, which makes this chart incompatible with a pretrained
+intensity template.
+
+\paragraph{The winding obstruction.} Chart (a) is the only one whose direction
+field is unit-normalized. An azimuthal pattern of order $m$ requires
+$(\cos2\chi,\sin2\chi)$ to wind $m$ times around the origin as one circles the
+source, and winding number cannot change continuously during optimization. The
+fit therefore either begins in the correct topological sector or cannot reach it.
+Charts (b)--(e) use free $f^{q},f^{u}$ and carry no such barrier; this turns out
+to matter more than any other modelling choice we tested (Sec.~\ref{sec:results}).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+chart & construction & $P\le I$ & support & winding \\
+\midrule
+\texttt{fractional} & Eq.~\eqref{eq:fractional} & exact & by construction & \textcolor{red}{yes} \\
+\texttt{direct}     & Eq.~\eqref{eq:direct}     & penalty & penalty & no \\
+\texttt{iscaled}    & Eq.~\eqref{eq:iscaled}    & $\le\sqrt2 I$ & by construction & no \\
+\texttt{expm}       & Eq.~\eqref{eq:expm}       & exact & by construction & no \\
+\texttt{expm\_full} & Eq.~\eqref{eq:expmfull}   & exact & by construction & no \\
+\bottomrule
+\end{tabular}
+\caption{The five charts. Only \texttt{fractional} imposes a topological
+constraint on the polarization direction.}
+\label{tab:charts}
+\end{table}
+
+\section{Instrument model}
+
+Model visibilities are formed per Stokes parameter by Eq.~\eqref{eq:forward} and
+combined into correlation products through Eq.~\eqref{eq:circular},
+\begin{equation}
+  \hat V^{RR} = \hat V^{I}+\hat V^{V},\quad
+  \hat V^{LL} = \hat V^{I}-\hat V^{V},\quad
+  \hat V^{RL} = \hat V^{Q}+i\hat V^{U},\quad
+  \hat V^{LR} = \hat V^{Q}-i\hat V^{U}.
+  \label{eq:products}
+\end{equation}
+Station-based complex gains are then applied to the \emph{model},
+\begin{equation}
+  \hat V^{\,pq}_{mn}(t) \;\longleftarrow\;
+  g_{p,m}(t)\; \hat V^{\,pq}_{mn}(t)\; \overline{g_{q,n}(t)} ,
+  \label{eq:rime}
+\end{equation}
+for stations $m,n$ and feed hands $p,q\in\{R,L\}$ selected by the product
+($RR\!\to\!(R,R)$, $RL\!\to\!(R,L)$, and so on). Corrupting the model rather than
+dividing the data is equivalent for pure gains, but only this order remains
+correct once leakage enters the chain. The amplitudes are bounded smoothly and
+the phases referenced to a fixed station $m_0$,
+\begin{equation}
+  |g_m| = g^{\mathrm{lo}}_m + \bigl(g^{\mathrm{hi}}_m-g^{\mathrm{lo}}_m\bigr)\,
+          \sigma(\cdot),
+  \qquad
+  \arg g_m \;\to\; \arg g_m - \arg g_{m_0},
+  \label{eq:gains}
+\end{equation}
+with per-station bounds taken from that station's known calibration quality, so a
+gain that reaches its bound can still return; a hard clip would kill the gradient
+there. Referencing the phase removes the degeneracy between a global phase and a
+translation of the image --- which also means the absolute position of a
+self-calibrated reconstruction is not determined.
+
+\section{Objective}
+
+The quantity minimized is a sum of per-product $\chi^2$ terms plus image-domain
+penalties,
+\begin{equation}
+  \mathcal{L}(\Theta)
+  = \sum_{p\in\{RR,LL,RL,LR\}} \chi^2_p(\Theta)
+  \;+\; \sum_{k} \lambda_k R_k(\Theta).
+  \label{eq:total}
+\end{equation}
+Amplitude and closure-phase $\chi^2$ are computed but never enter
+$\mathcal{L}$; they are diagnostics, and the closure quantities double as a
+calibration canary because they are invariant to Eq.~\eqref{eq:rime}. The
+penalties, written over pixels $p$ and frames $t$, are
+\begin{align}
+  R_{\mathrm{neg}} &= \sum_{p,t} \bigl[\max(0,-I_{pt})\bigr]^2,
+  \label{eq:pen_neg}\\[2pt]
+  R_{P\le I} &= \sum_{p,t} \bigl[\max\bigl(0,\ P_{pt}-I_{pt}\bigr)\bigr]^2,
+  \label{eq:pen_pli}\\[2pt]
+  R_{\mathrm{flux}} &= \Bigl\langle
+     \Bigl(\textstyle\sum_p I_{pt} - F_t\Bigr)^2 \big/ F_t^2
+     \Bigr\rangle_t ,
+  \label{eq:pen_flux}\\[2pt]
+  R_{\mathrm{cmp}} &= \Bigl\langle \textstyle\sum_p \max(0,I_{pt})\;\hat r_p^2
+     \Bigr\rangle_t ,
+     \qquad \hat r_p^2 = r_p^2 \big/ \langle r^2\rangle ,
+  \label{eq:pen_cmp}\\[2pt]
+  R_{\mathrm{dyn}} &= \frac{1}{r}\sum_{p,j} \bigl|w^{I}_{j}(x_p,y_p)\bigr|\,\hat r_p^2 ,
+  \label{eq:pen_dyn}\\[2pt]
+  R_{\mathrm{sup}} &= \Bigl\langle \textstyle\sum_p P_{pt}\,
+     e^{-|I_{pt}|/(\tau I_{\max})} \Bigr\rangle_t ,
+  \label{eq:pen_sup}\\[2pt]
+  R_{L_1} &= \Bigl\langle \textstyle\sum_p P_{pt} \Bigr\rangle_t ,
+  \qquad
+  R_{\mathrm{sp}} = \sum_{\SP}\Bigl(
+     \bigl\langle|w^{\SP}_0|\bigr\rangle + \bigl\langle|w^{\SP}|\bigr\rangle
+     + \bigl\langle|b^{\SP}_0|\bigr\rangle + \bigl\langle|b^{\SP}|\bigr\rangle \Bigr).
+  \label{eq:pen_l1}
+\end{align}
+Here $r_p$ is the pixel radius from the field centre, $F_t$ is the total flux at
+frame $t$, and $\langle\cdot\rangle$ denotes a mean. Negativity is applied to $I$
+alone, since $Q,U,V$ are signed. In $R_{\mathrm{sup}}$ the intensity enters the
+gate only as a passive reference (no gradient), so the term can push $P$ down but
+never push $I$ up.
+
+\paragraph{Flux is measured, not fitted.} Total flux is degenerate with the
+overall gain amplitude, and the array has no zero-spacing baseline. It is,
+however, directly measurable: dishes at a common site (ALMA--APEX, SMA--JCMT)
+form baselines of metres, on which any plausible source is unresolved, so
+\begin{equation}
+  F_t = \bigl|V_{mn}(t)\bigr| \quad\text{for co-located } m,n .
+  \label{eq:lightcurve}
+\end{equation}
+A real source varies, so $F_t$ is a curve, not a number. It may be used softly
+through $R_{\mathrm{flux}}$, or imposed structurally by rescaling every Stokes
+parameter at each frame,
+\begin{equation}
+  \bigl(I,Q,U,V\bigr)_{pt} \;\longleftarrow\;
+  \frac{F_t}{\sum_{p'} I_{p't}} \,\bigl(I,Q,U,V\bigr)_{pt},
+  \label{eq:fixflux}
+\end{equation}
+which removes the degree of freedom entirely and leaves every polarization
+fraction untouched.
+
+\paragraph{Which terms are priors, and of what kind.}
+Table~\ref{tab:priors} sorts the ingredients of Eq.~\eqref{eq:total} by the kind
+of justification each has: \emph{structural} (enforced by the parameterization,
+no free weight), \emph{measured} (a number estimated from the data), and
+\emph{hand-tuned} (a weight chosen because it worked). The last category is the
+one to minimize.
 
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{llll}
 \toprule
-chart & construction & $P \le I$ & support \\
+term & equation & kind & justification \\
 \midrule
-\texttt{fractional} & $Q,U = m_\ell I(\cos 2\xi, \sin 2\xi)$, unit direction
-  & exact & by construction \\
-\texttt{direct} & $Q,U$ free signed fields
-  & soft penalty & none \\
-\texttt{iscaled} & $Q,U = I \tanh(q), I \tanh(u)$
-  & $\le \sqrt2 I$ & by construction \\
-\texttt{expm} & $(Q,U,V) = I \tanh(p)(q,u,v)/p$
-  & exact & by construction \\
-\texttt{expm\_full} & $X = \exp M$, $M$ Hermitian (Eq.~\ref{eq:expmfull})
-  & exact & by construction \\
+$\alpha_j\le0$, $\omega_j$ bounded & \eqref{eq:spectrum_bounds} & structural & no growing modes; band limit \\
+unit-RMS mode gauge & \eqref{eq:gauge} & structural & removes the $w\!\leftrightarrow\!b$ scale freedom \\
+$P\le I$, support & \eqref{eq:expm} & structural & enforced by the chart \\
+shared/private spectrum & \eqref{eq:partition} & structural & falsifiable, no weight \\
+$R_{\mathrm{neg}}$ & \eqref{eq:pen_neg} & structural & $\lambda$ fixed; penalizes $I<0$ only \\
+$F_t$ light curve & \eqref{eq:lightcurve} & measured & intra-site baselines \\
+gain bounds & \eqref{eq:gains} & measured & per-station calibration quality \\
+$R_{\mathrm{cmp}}$ & \eqref{eq:pen_cmp} & hand-tuned & weight chosen empirically \\
+$R_{P\le I},R_{\mathrm{dyn}},R_{\mathrm{sup}},R_{L_1}$ & \eqref{eq:pen_pli}--\eqref{eq:pen_l1}
+  & hand-tuned & \textbf{set to zero (Sec.~\ref{sec:results})} \\
 \bottomrule
 \end{tabular}
-\caption{Polarization charts. All consume the same raw sub-fields; only the
-pointwise map to Stokes differs. \texttt{expm\_full} parameterizes the full
-coherency matrix, so $I>0$ and $P\le I$ hold everywhere, at the cost of making
-the intensity logarithmic.}
-\label{tab:charts}
-\end{table}
-
-The last row of Table~\ref{tab:charts} builds the coherency matrix itself as a
-matrix exponential,
-\begin{equation}
-  X = \exp
-  \begin{pmatrix}
-    s + v & q + iu \\
-    q - iu & s - v
-  \end{pmatrix},
-  \label{eq:expmfull}
-\end{equation}
-whose argument is Hermitian, so $X$ is positive semi-definite: $I > 0$ and
-$\det X = I^2 - P^2 \ge 0$ hold at every pixel by construction rather than by
-penalty. Here $s$ plays the role of a log-intensity.
-
-\subsection{Shared and private temporal modes}
-
-Each raw sub-field is a \neuralDMD{} field of the form of Eq.~\eqref{eq:dmd},
-with its own spatial modes $w_j^{\Stokes}$ and amplitudes $b_j^{\Stokes}$. The
-design question is whether they should also have their own spectra.
-
-Physics argues for sharing: the frequencies belong to the flow, not to the
-observable, so a single orbiting feature should imprint one harmonic ladder on
-every Stokes parameter. Statistics argues for sharing too, since the cross-hand
-products $RL, LR$ carry a small fraction of the parallel-hand signal-to-noise and
-frequencies are the hardest parameters to identify from them. But the spin-2
-argument above says the \emph{weights} on that ladder differ between $I$ and $P$,
-and nothing guarantees that a real source has no polarization-only variability at
-all --- Faraday effects and radially stratified emission can both produce it.
-
-Rather than assume an answer, we make the spectrum a partition. Writing
-$\Omega^{\mathrm{shared}}$ for the bank owned by one designated field and
-$\Omega^{\Stokes,\mathrm{own}}$ for a field's private spectrum, each coupled field
-uses
-\begin{equation}
-  \Omega^{\Stokes}_j =
-  \begin{cases}
-    \Omega^{\mathrm{shared}}_j, & j < n_{\mathrm{shared}},\\[2pt]
-    \Omega^{\Stokes,\mathrm{own}}_j, & j \ge n_{\mathrm{shared}} .
-  \end{cases}
-  \label{eq:partition}
-\end{equation}
-Setting $n_{\mathrm{shared}} = 0$ recovers fully independent fields; setting
-$n_{\mathrm{shared}} = r$ shares the whole bank; intermediate values leave each
-field private modes. The amplitudes $b_j^{\Stokes}$ are \emph{never} shared,
-since the per-Stokes weighting of the harmonics and the relative phases between
-Stokes parameters are exactly the physical content we want to measure.
-
-Two coupling scopes are useful. In the first, only the polarization sub-fields
-share a bank: $Q$ and $U$ are two components of one spin-2 field, so tying them
-together is well motivated independently of what $I$ does. In the second, Stokes
-$I$ joins the same bank, which is what makes the mode index $j$ mean the same
-frequency in every Stokes parameter and therefore makes per-mode polarimetry well
-defined.
-
-Because Eq.~\eqref{eq:partition} leaves private modes available, the fit itself
-reports whether they were needed. Define the shared power fraction of a field as
-\begin{equation}
-  f^{\Stokes}_{\mathrm{shared}}
-  = \frac{\sum_{j < n_{\mathrm{shared}}} |b_j^{\Stokes}|^2}
-         {\sum_{j} |b_j^{\Stokes}|^2}.
-  \label{eq:sharedpower}
-\end{equation}
-A value near unity says the polarized variability lives on the intensity's
-frequency ladder; a small value says it does not, which is a statement about the
-source rather than a failure of the fit.
-
-\subsection{Recovering physical rates}
-
-The fitted frequencies are dimensionless. With the normalized time axis spanning
-a window of $T$ hours, mode $j$ corresponds to
-\begin{equation}
-  \omega_j^{\mathrm{phys}} = \frac{\omega_j\, t_{\mathrm{scale}}}{T}
-  \quad [\mathrm{rad\ hr^{-1}}],
-  \label{eq:physfreq}
-\end{equation}
-so that an orbital period $T_{\mathrm{orb}}$ appears at
-$2\pi / T_{\mathrm{orb}}$ together with its harmonics. Because
-$\omega_j \ge 0$ and the conjugate partners are implicit in
-Eq.~\eqref{eq:dmd}, the \emph{sense} of rotation is not encoded in the spectrum:
-it lives in the azimuthal phase gradient of $\arg w_j(x)$, and any claim about
-the direction of motion must be read from the spatial modes rather than from
-$\Omega$.
-
-\section{Measurement model}
-
-Model visibilities are formed by sampling the Fourier transform of each Stokes
-cube at the observed baselines, combining them into correlation products via
-Eq.~\eqref{eq:circ}, and then applying the instrument. For station-based
-complex gains $g$, the product $p$ on baseline $(i,j)$ becomes
-\begin{equation}
-  \hat V^{p}_{ij}(t) \;\longleftarrow\;
-  g_{h_i, i}(t)\, \hat V^{p}_{ij}(t)\, \overline{g_{h_j, j}(t)},
-  \label{eq:rime}
-\end{equation}
-where $h_i, h_j$ select the polarization hand appropriate to the product
-($RR \to (R,R)$, $RL \to (R,L)$, and so on). Two choices are deliberate. The
-gains are applied to the \emph{model} rather than divided into the data: the two
-are equivalent for pure gains but only the former remains correct once
-leakage terms enter the chain. And the amplitudes are bounded smoothly,
-$|g| = g_{\mathrm{lo}} + (g_{\mathrm{hi}}-g_{\mathrm{lo}})\,\sigma(\cdot)$, with
-per-station bounds taken from that station's known calibration quality, so a gain
-that reaches its bound can still return; a hard clip would zero the gradient
-there. Phases are referenced to a fixed station, removing the degeneracy between
-a global phase and a shift of the image.
-
-\section{The objective, and which parts of it are priors}
-
-The quantity minimized is
-\begin{equation}
-  \mathcal{L} = \sum_{p} \chi^2_p
-    \;+\; \sum_{k} \lambda_k \, R_k ,
-  \label{eq:total}
-\end{equation}
-with $\chi^2_p$ the reduced $\chi^2$ of Eq.~\eqref{eq:chi2} for each correlation
-product and $R_k$ a set of penalties. Amplitude and closure-phase $\chi^2$ are
-computed but never enter $\mathcal{L}$; they are diagnostics, and the closure
-quantities double as a calibration canary because they are gain-invariant.
-
-It is worth being explicit about how much of Eq.~\eqref{eq:total} is not data.
-Table~\ref{tab:priors} sorts the terms by the kind of justification each has. We
-distinguish priors that are structural (a physical constraint the parameterization
-or the architecture enforces, with no free weight), measured (a number estimated
-from the data itself), and hand-tuned (a weight chosen because it worked). The
-last category is the one to minimize, and the training loop records every term's
-value so that the balance between data and prior is a measured number for every
-run rather than an inference from the configuration file.
-
-\begin{table}[t]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-term & kind & justification \\
-\midrule
-$\alpha_j \le 0$, $\omega_j$ bounded & structural & no growing modes; band limit \\
-unit-RMS mode gauge & structural & removes the $w \leftrightarrow b$ scale freedom \\
-$P \le I$, support & structural & enforced by the chart (Table~\ref{tab:charts}) \\
-negativity of $I$ & structural & $\lambda$ fixed, penalizes $I<0$ only \\
-shared/private spectrum & structural & Eq.~\eqref{eq:partition}; no weight \\
-total flux anchor & measured & zero-spacing flux from intra-site baselines \\
-station gain bounds & measured & per-station calibration quality \\
-compactness, $L_1$ sparsity & hand-tuned & weights chosen empirically \\
-\bottomrule
-\end{tabular}
-\caption{The objective's ingredients, sorted by how each is justified. The aim of
-this work is to move terms up this table --- to replace tuned weights by
-structure the model carries for a stated reason.}
+\caption{Ingredients of the objective, sorted by how each is justified.}
 \label{tab:priors}
 \end{table}
 
 \section{Architecture}
 
-\begin{figure}[t]
+Figure~\ref{fig:arch} assembles the pieces. Three networks produce the spatial
+modes, the spectrum and the amplitudes; the modal sum of Eq.~\eqref{eq:field}
+combines them, a chart maps the result to Stokes parameters, and the instrument
+model turns those into the measured correlation products. Only $\Theta_\Omega$ is
+shared between Stokes parameters: $w^{\SP}_j$ and $b^{\SP}_j$ carry a per-Stokes
+label and stay separate, which is what keeps the per-Stokes harmonic weights and
+the relative phases available to be read off after the fit.
+
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
     font=\small,
-    box/.style={draw, rounded corners=2pt, minimum height=7mm, minimum width=17mm,
-                align=center, inner sep=3pt},
-    net/.style={box, fill=blue!8},
-    op/.style={box, fill=black!5},
-    res/.style={box, fill=green!8},
-    sh/.style={box, fill=orange!12},
-    ar/.style={-{Latex[length=2mm]}, thin},
-    node distance=5mm and 8mm,
+    x=1cm, y=1cm,
+    box/.style   = {draw, rounded corners=2pt, minimum height=8mm,
+                    minimum width=19mm, align=center, inner sep=2pt},
+    net/.style   = {box, fill=blue!8},
+    shared/.style= {box, fill=orange!18},
+    op/.style    = {box, fill=black!4},
+    res/.style   = {box, fill=green!10},
+    ar/.style    = {-{Latex[length=2mm]}},
   ]
 
-  % ---- spatial branch
-  \node[op] (xy) {$(x,y)$};
-  \node[op, right=of xy] (enc) {positional\\encoding};
-  \node[sh, right=of enc] (trunk) {shared trunk\\$\Theta_w$};
-  \node[net, right=12mm of trunk, yshift=9mm] (headI) {head $I$};
-  \node[net, right=12mm of trunk, yshift=-9mm] (headP) {heads $Q,U,V$};
+  % ---------- row 1: sky model (left to right) ----------
+  \node[op]     (xy) at (0,   0)    {$(x,y)$};
+  \node[op]     (z1) at (0,  -1.35) {latent};
+  \node[op]     (z2) at (0,  -2.7)  {latent};
 
-  \draw[ar] (xy) -- (enc);
-  \draw[ar] (enc) -- (trunk);
-  \draw[ar] (trunk) -- (headI);
-  \draw[ar] (trunk) -- (headP);
+  \node[net]    (nw) at (3,   0)    {$\Theta_w$};
+  \node[shared] (no) at (3,  -1.35) {$\Theta_\Omega$};
+  \node[net]    (nb) at (3,  -2.7)  {$\Theta_b$};
 
-  % ---- temporal branch
-  \node[op, below=16mm of xy] (lat) {latent};
-  \node[sh, right=of lat] (om) {$\Theta_\Omega$\\shared bank};
-  \node[net, right=of om] (priv) {private\\$\Omega^{\Stokes}$};
-  \node[net, below=9mm of om] (bnet) {$\Theta_b^{\Stokes}$};
+  \node         (ow) at (5.6, 0)    {$w^{\SP}_j(x,y)$};
+  \node         (oo) at (5.6,-1.35) {$\Omega_j$};
+  \node         (ob) at (5.6,-2.7)  {$b^{\SP}_j$};
 
-  \draw[ar] (lat) -- (om);
-  \draw[ar] (om) -- (priv);
-  \draw[ar] (lat) |- (bnet);
+  \node[op]     (sum)   at (9.0,-1.35) {modal sum\\Eq.~\eqref{eq:field}};
+  \node[res]    (chart) at (12.3,-1.35) {chart\\Eq.~\eqref{eq:expm}};
 
-  % ---- combine
-  \node[op, right=14mm of headP, yshift=-9mm] (sum)
-    {$w_0 b_0 + 2\mathrm{Re}\sum_j w_j b_j e^{\Omega_j t}$};
-  \node[op, right=of sum] (chart) {chart};
-  \node[res, right=of chart] (cubes) {$I,Q,U,V$};
-
-  \draw[ar] (headI) -- ++(9mm,0) |- (sum);
-  \draw[ar] (headP) -- ++(9mm,0) |- (sum);
-  \draw[ar] (priv) -| (sum);
-  \draw[ar] (bnet) -| (sum);
+  \draw[ar] (xy) -- (nw);  \draw[ar] (nw) -- (ow);
+  \draw[ar] (z1) -- (no);  \draw[ar] (no) -- (oo);
+  \draw[ar] (z2) -- (nb);  \draw[ar] (nb) -- (ob);
+  \draw[ar] (ow.east) -| (sum.north);
+  \draw[ar] (oo.east) -- (sum.west);
+  \draw[ar] (ob.east) -| (sum.south);
   \draw[ar] (sum) -- (chart);
+
+  \node[font=\scriptsize, anchor=north] at (3,-1.78) {(shared)};
+
+  % ---------- row 2: instrument (right to left) ----------
+  \node[res] (cubes) at (12.3,-4.5) {$I,Q,U,V$};
+  \node[op]  (ft)    at (9.0, -4.5) {$\mathcal{F}$, sample\\Eq.~\eqref{eq:forward}};
+  \node[op]  (prod)  at (5.6, -4.5) {products\\Eq.~\eqref{eq:products}};
+  \node[op]  (gain)  at (2.6, -4.5) {gains\\Eq.~\eqref{eq:rime}};
+  \node[res] (chi)   at (0,   -4.5) {$\chi^2$};
+
   \draw[ar] (chart) -- (cubes);
-
-  % ---- measurement
-  \node[op, below=11mm of chart] (ft) {$\mathcal{F}$ + baseline\\sampling};
-  \node[op, left=of ft] (prod) {$RR,LL,RL,LR$};
-  \node[op, left=of prod] (gain) {station gains};
-  \node[res, left=of gain] (chi) {$\chi^2$};
-
-  \draw[ar] (cubes) |- (ft);
-  \draw[ar] (ft) -- (prod);
-  \draw[ar] (prod) -- (gain);
-  \draw[ar] (gain) -- (chi);
-
-  \begin{scope}[on background layer]
-    \node[draw, dashed, rounded corners, fit=(trunk)(om),
-          inner sep=4pt, label={[font=\scriptsize]above:shared across Stokes}] {};
-  \end{scope}
+  \draw[ar] (cubes) -- (ft);
+  \draw[ar] (ft)    -- (prod);
+  \draw[ar] (prod)  -- (gain);
+  \draw[ar] (gain)  -- (chi);
 \end{tikzpicture}
-\caption{Polarimetric \neuralDMD{}. Coordinates pass through a positional
-encoding and a spatial trunk to per-Stokes mode heads; a latent vector drives the
-temporal spectrum and the per-Stokes amplitudes. The dashed region marks what may
-be shared between Stokes: the temporal bank always, the spatial trunk optionally.
-Private spectra remain available so a Stokes parameter can carry a frequency the
-others do not. The reconstructed cubes are pushed through the chart, Fourier
-transformed and sampled at the observed baselines, combined into correlation
-products, and corrupted by station gains before comparison with the data.}
+\caption{Polarimetric \neuralDMD. Top row: the sky model, from coordinates and
+latent vectors to the Stokes cubes. Bottom row: the instrument, from the sky to
+the $\chi^2$ against the observed correlation products. The shaded network is the
+only one shared between Stokes parameters.}
 \label{fig:arch}
 \end{figure}
 
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}[
-    font=\small,
-    stg/.style={draw, rounded corners=2pt, minimum height=7mm, align=center,
-               inner sep=3pt, fill=black!4},
-    ar/.style={-{Latex[length=2mm]}, thin},
-    node distance=5mm and 7mm,
-  ]
-  \node[stg] (truth) {ground-truth\\movie};
-  \node[stg, right=of truth] (obs) {\texttt{ehtim}\\observation};
-  \node[stg, right=of obs] (prod) {per-product\\targets, $\sigma$, masks};
-  \node[stg, right=of prod] (fit) {fit\\(Eq.~\ref{eq:total})};
-  \node[stg, right=of fit] (mod) {modes\\$\Omega_j, w_j, b_j$};
-
-  \node[stg, below=9mm of fit] (img) {image metrics\\NRMSE, EVPA, $\beta_2$};
-  \node[stg, below=9mm of mod] (phys) {physical rates\\Eq.~\ref{eq:physfreq}, Eq.~\ref{eq:sharedpower}};
-
-  \draw[ar] (truth) -- (obs);
-  \draw[ar] (obs) -- (prod);
-  \draw[ar] (prod) -- (fit);
-  \draw[ar] (fit) -- (mod);
-  \draw[ar] (fit) -- (img);
-  \draw[ar] (mod) -- (phys);
-  \draw[ar] (truth) |- (img);
-\end{tikzpicture}
-\caption{Evaluation pipeline. A ground-truth movie (parametric or from the EHT
-validation ladder) is observed with the array's real coverage, ingested into
-per-product visibilities, and fitted. The reconstruction is scored against the
-truth in the image domain, while the recovered modes are scored against the
-physical rates that generated the movie.}
-\label{fig:pipeline}
-\end{figure}
-
 \section{Results}
+\label{sec:results}
 
-All comparisons below reuse frozen observations, so every arm sees byte-identical
+Every comparison below reuses a frozen observation, so all arms see identical
 data and only the model changes. Two synthetic truths are used: \textsf{HSP}, a
 weakly polarized ring with a polarized orbiting hot spot, where intensity and
 polarization are both dynamic; and \textsf{VB2}, a rotating polarization pattern
-on a \emph{static} ring, where polarization carries all of the time dependence.
-Their measured temporal spectra sit on a common harmonic ladder built on the
-80-minute orbit ($\omega_{\mathrm{orb}} = 4.71$ rad\,hr$^{-1}$) but weight it
-differently: intensity peaks at the fundamental, polarization at the second
-harmonic, exactly as the spin-2 argument of Section~2.1 predicts.
+on a \emph{static} ring, where polarization carries all the time dependence.
+Their measured spectra sit on the common ladder of Eq.~\eqref{eq:spin2} built on
+the 80-minute orbit ($\Omega_{\mathrm{orb}}=4.71$ rad\,hr$^{-1}$), with intensity
+peaking at the fundamental and polarization at the second harmonic. Because two
+runs of the same configuration can land in different optima, every entry is a
+median over seeds with the full range in brackets.
 
-\subsection{The chart matters more than anything else}
-
-Because two runs of the same configuration on the same data can land in different
-optima, every entry is a median over seeds with the full range in brackets
-(Table~\ref{tab:charts_result}). The single largest effect is not the coupling,
-the rank, or any penalty weight: it is which chart builds $(Q,U)$.
+\subsection{The chart dominates}
 
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{llcccc}
 \toprule
-data & chart & $n$ & $\chi^2$ over floor & NRMSE$_Q$ med [min,max] & EVPA$^\circ$ med [min,max] \\
+data & chart & $n$ & $\chi^2$ over floor & NRMSE$_Q$ & EVPA [deg] \\
 \midrule
-VB2 & \texttt{iscaled}   & 2 & 0.012 & 0.107 [0.107, 0.108] & 0.96 [0.94, 0.99] \\
-VB2 & \texttt{expm}      & 8 & 0.014 & 0.112 [0.094, 0.123] & 1.21 [0.96, 1.47] \\
-VB2 & \texttt{fractional}& 5 & 0.017 & 0.403 [0.141, \textbf{1.320}] & 2.68 [1.21, \textbf{44.8}] \\
+VB2 & \texttt{iscaled}    & 2 & 0.012 & 0.107 [0.107, 0.108] & 0.96 [0.94, 0.99] \\
+VB2 & \texttt{expm}       & 8 & 0.014 & 0.112 [0.094, 0.123] & 1.21 [0.96, 1.47] \\
+VB2 & \texttt{fractional} & 5 & 0.017 & 0.403 [0.141, \textbf{1.320}] & 2.68 [1.21, \textbf{44.8}] \\
 \midrule
-HSP & \texttt{expm}      & 7 & 0.016 & 0.534 [0.506, 0.611] & 5.31 [4.97, 6.61] \\
-HSP & \texttt{iscaled}   & 2 & 0.160 & 0.518 [0.518, 0.518] & 5.17 [4.75, 5.59] \\
-HSP & \texttt{fractional}& 7 & 0.077 & 0.571 [0.500, \textbf{1.000}] & 8.42 [5.56, \textbf{24.0}] \\
+HSP & \texttt{expm}       & 7 & 0.016 & 0.534 [0.506, 0.611] & 5.31 [4.97, 6.61] \\
+HSP & \texttt{iscaled}    & 2 & 0.160 & 0.518 [0.518, 0.518] & 5.17 [4.75, 5.59] \\
+HSP & \texttt{fractional} & 7 & 0.077 & 0.571 [0.500, \textbf{1.000}] & 8.42 [5.56, \textbf{24.0}] \\
 \bottomrule
 \end{tabular}
-\caption{Reconstruction quality by chart, pooled over seeds at the best rank for
-each dataset. The charts with free $q,u$ fields are near-deterministic; the
-\texttt{fractional} chart has a heavy failure tail in every configuration tried.}
+\caption{Reconstruction quality by chart, at the best rank for each dataset.
+Charts with free $q,u$ fields are near-deterministic; \texttt{fractional} has a
+heavy failure tail in every configuration tried.}
 \label{tab:charts_result}
 \end{table}
 
-The \texttt{fractional} chart normalizes the polarization direction
-$(\cos 2\xi, \sin 2\xi)$ to the unit circle. That makes $P = m_\ell |I|$ exact,
-but it also forces the direction field to \emph{wind} twice around the source for
-an $m=2$ pattern, and winding number cannot change continuously. The optimizer
-therefore either starts in the right topological sector or cannot reach it, which
-is what produces the bimodal outcome: on VB2 its EVPA error ranges from
-$1.2^\circ$ to $44.8^\circ$ across seeds of the same configuration. The charts
-that build $Q,U$ from free fields carry no such obstruction and their spread
-collapses to a few percent.
+Table~\ref{tab:charts_result} shows that the largest effect is not the coupling,
+the rank, or any penalty weight, but the chart. On VB2 the \texttt{fractional}
+EVPA error ranges from $1.2^\circ$ to $44.8^\circ$ across seeds of the same
+configuration, while \texttt{iscaled} varies only between $0.94^\circ$ and
+$0.99^\circ$. This is the winding obstruction of Sec.~\ref{sec:charts}: the
+optimizer either starts in the right topological sector or cannot reach it.
 
-This is worth emphasizing because the remedy costs nothing. \texttt{expm} obtains
-exact $P \le I$ from $m = \tanh p \le 1$ and support from its proportionality to
-$I$, both by construction and with \emph{no} penalty weight; it is also natively
-capable of Stokes $V$. It is a change of coordinates, not a new prior.
+The remedy costs nothing. Chart (d) obtains $P\le I$ exactly from $m=\tanh p\le1$
+and support from its proportionality to $I$, both by construction and with no
+penalty weight. It is a change of coordinates, not a new prior.
 
 \subsection{Shared and private modes}
 
-With the partition of Eq.~\eqref{eq:partition} the data can say whether
-polarization needs frequencies of its own. Fitting HSP with $6$ of $8$ modes
-shared, the polarization field places $\mathbf{100\%}$ of its amplitude power on
-the shared modes while Stokes $I$ retains $29.6\%$ on its private ones. On these
-truths polarization's periodicity is a strict \emph{subset} of the intensity's
-ladder: it needs no frequency that $I$ does not already have, while $I$ has
-variability that polarization does not share. (With $n_{\mathrm{shared}} = r$ the
-fraction is trivially unity and carries no information.)
+Fitting HSP with $6$ of $8$ modes shared, Eq.~\eqref{eq:sharedpower} gives
+$\mathcal{R}=1.000$ for the polarization field and $\mathcal{R}=0.704$ for Stokes
+$I$. On these truths the polarized variability lives entirely on the shared
+ladder: polarization needs no frequency that $I$ does not already have, while $I$
+retains variability that polarization does not share. (With $n_{\mathrm{sh}}=r$
+the fraction is trivially unity and carries no information.)
 
-Coupling helps where the physics says it should. On HSP, where intensity and
-polarization are both dynamic, sharing the whole bank gives the best fit to the
-data ($\chi^2$ over floor $0.016$ versus $0.077$ uncoupled at equal rank). On
-VB2, whose intensity is static and therefore has no dynamics to lend, coupling is
-neutral. Rank matters as much as coupling and was swept alongside it: a shared
-bank holds $r$ frequencies where independent fields hold up to $4r$, so comparing
-coupled and uncoupled models at fixed $r$ would confound the two.
+Coupling helps where the physics says it should. On HSP, where both are dynamic,
+sharing the whole bank gives the best fit ($\chi^2$ over floor $0.016$ versus
+$0.077$ uncoupled at equal rank). On VB2, whose intensity is static and has no
+dynamics to lend, coupling is neutral. Rank was swept alongside coupling, since a
+shared bank holds $r$ frequencies where independent fields hold up to $4r$.
 
 \subsection{How much of the objective can be retired}
-
-Fixing the chart to \texttt{expm} and the coupling to a shared bank, we then
-removed the image penalties (Table~\ref{tab:knobs}).
 
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{llcccc}
 \toprule
-data & priors & $n$ & $\chi^2$ over floor & NRMSE$_I$ [min,max] & NRMSE$_Q$ [min,max] \\
+data & penalties & $n$ & $\chi^2$ over floor & NRMSE$_I$ & NRMSE$_Q$ \\
 \midrule
-VB2 & all           & 2 & 0.014 & \textbf{0.124} [0.124, 0.127] & 0.111 [0.111, 0.114] \\
-VB2 & measured flux & 2 & 0.014 & 0.345 [0.345, 0.367] & 0.102 [0.102, 0.102] \\
-VB2 & none          & 2 & 0.014 & 0.350 [0.350, 0.386] & \textbf{0.094} [0.094, 0.112] \\
+VB2 & all                & 2 & 0.014 & \textbf{0.124} [0.124, 0.127] & 0.111 [0.111, 0.114] \\
+VB2 & measured flux only & 2 & 0.014 & 0.345 [0.345, 0.367] & 0.102 [0.102, 0.102] \\
+VB2 & none               & 2 & 0.014 & 0.350 [0.350, 0.386] & \textbf{0.094} [0.094, 0.112] \\
 \midrule
-HSP & all           & 2 & 0.228 & \textbf{0.139} [0.139, 0.196] & 0.519 [0.519, 0.611] \\
-HSP & measured flux & 2 & 0.004 & 0.432 [0.432, 0.434] & \textbf{0.506} [0.506, 0.511] \\
-HSP & none          & 2 & 0.012 & 0.432 [0.432, 0.444] & 0.522 [0.522, 0.534] \\
+HSP & all                & 2 & 0.228 & \textbf{0.139} [0.139, 0.196] & 0.519 [0.519, 0.611] \\
+HSP & measured flux only & 2 & 0.004 & 0.432 [0.432, 0.434] & \textbf{0.506} [0.506, 0.511] \\
+HSP & none               & 2 & 0.012 & 0.432 [0.432, 0.444] & 0.522 [0.522, 0.534] \\
 \bottomrule
 \end{tabular}
-\caption{Removing the image penalties, at the \texttt{expm} chart. Polarization
-is insensitive to them; total intensity is not.}
+\caption{Removing the image penalties, at the \texttt{expm} chart. Polarization is
+insensitive to them; total intensity is not.}
 \label{tab:knobs}
 \end{table}
 
-The split is clean and, in hindsight, sensible. \textbf{Polarization needs no
-image prior at all}: its NRMSE and EVPA are unchanged, or marginally better,
-with every penalty at zero, because the chart already supplies support and the
-bound $P \le I$. \textbf{Total intensity does need the compactness prior}, whose
-removal costs a factor of two to three in NRMSE$_I$ (0.14 to 0.43 on HSP, 0.12
-to 0.35 on VB2). This is the null-space argument of Section~5 made concrete: the
-array's short baselines do not constrain large-scale intensity, and nothing else
-in the objective penalizes an off-source haze.
+The split in Table~\ref{tab:knobs} is clean. \textbf{Polarization needs no image
+prior at all}: NRMSE$_Q$ and EVPA are unchanged, or marginally better, with every
+penalty at zero, because the chart already supplies support and $P\le I$.
+\textbf{Total intensity does need $R_{\mathrm{cmp}}$}, whose removal costs a
+factor two to three (NRMSE$_I$ from $0.139$ to $0.432$ on HSP). That is the
+short-baseline null space made concrete: nothing else in Eq.~\eqref{eq:total}
+penalizes an off-source haze.
 
-The hand-tuned part of the objective therefore reduces to a \emph{single}
-weight, acting on Stokes $I$ alone. The total-flux anchor moves from a tuned
-scalar to a measured light curve, which on real data is accurate to $0.78\%$
-(Section~6.4); the polarization penalties, the $P \le I$ penalty, and the
-dynamic-compactness penalty all go to zero without loss.
+The hand-tuned part of the objective therefore reduces to a \emph{single} weight,
+acting on Stokes $I$ alone. Terms
+$R_{P\le I}$, $R_{\mathrm{dyn}}$, $R_{\mathrm{sup}}$ and $R_{L_1}$ all go to zero
+without loss, and the flux anchor moves from a tuned scalar to a measured curve.
 
 \subsection{Real data: the EHT validation ladder}
 
 We fit the ladder's \texttt{grmhd2+hs1} observation --- a GRMHD simulation with an
-injected hot spot, observed with the real array's coverage (7 stations, 99
-snapshots, 1976 visibilities over 3.15\,hr).
+injected hot spot, on the real array (7 stations, 99 snapshots, 1976 visibilities
+over 3.15\,hr).
 
-Two properties of this data change what the objective may be. First, it is not
-phase calibrated: scoring the ground-truth movie against the very data it
-generated gives $\chi^2_{\mathrm{cphase}} = 0.999$ and
-$\chi^2_{\mathrm{logcamp}} = 0.884$, but $\chi^2_{\mathrm{vis}} = 1.2\times10^5$.
-Fitting complex visibilities without solving for station terms is therefore not
-merely suboptimal, it is measuring the wrong thing. Second, the source is
-genuinely variable, its total flux swinging from 2.08 to 3.22\,Jy over the track,
-so a scalar flux anchor would fight the variability it is meant to constrain.
+Two properties of this data constrain what the objective may be. First, it is not
+phase calibrated: scoring the ground truth against the data it generated gives
+$\chi^2_{\mathrm{cphase}}=0.999$ and $\chi^2_{\mathrm{logcamp}}=0.884$ but
+$\chi^2_{\mathrm{vis}}=1.2\times10^5$, so fitting complex visibilities without
+solving Eq.~\eqref{eq:rime} measures the wrong thing. Second, the source varies,
+its total flux swinging from 2.08 to 3.22\,Jy, so a scalar anchor would fight the
+variability it is meant to constrain.
 
-With station gains and phases solved jointly and the total flux fixed per frame
-to the measured light curve, the reconstruction reaches
+With gains and phases solved jointly and the flux fixed per frame through
+Eq.~\eqref{eq:fixflux}:
 \begin{center}
-\begin{tabular}{lccc}
+\small
+\begin{tabular}{lcc}
 \toprule
  & $\chi^2_{\mathrm{cphase}}$ & $\chi^2_{\mathrm{logcamp}}$ \\
 \midrule
-ground truth (floor)              & 0.999 & 0.884 \\
-this work                         & \textbf{1.306} & \textbf{1.281} \\
-soft flux anchor, gains solved    & 174.8 & 17.0 \\
-no calibration solved             & 184.7 & 16.6 \\
+ground truth (floor)                 & 0.999 & 0.884 \\
+this work                            & \textbf{1.306} & \textbf{1.281} \\
+soft flux anchor, gains solved       & 174.8 & 17.0 \\
+amplitude-only gains                 & $\sim\!10^4$ & --- \\
+no calibration solved                & 184.7 & 16.6 \\
 \bottomrule
 \end{tabular}
 \end{center}
-i.e. the gain-invariant observables are reproduced essentially at the noise floor
-the data permits. The step that mattered was making the flux constraint
-structural rather than soft: with a soft anchor the fit was outvoted by the data
-term and collapsed to a negative-flux solution, since 693 free gain phases can
-absorb almost any sky.
+The gain-invariant observables are reproduced essentially at the floor the data
+permits. Two steps mattered. Solving \emph{phases} is not an optimization detail:
+with amplitude-only gains the fit never leaves $\chi^2\sim10^4$. And the flux
+constraint had to be structural --- with a soft anchor the data term outvoted it
+and the fit collapsed to negative total flux, since several hundred free gain
+phases can absorb almost any sky.
 
-The remaining discrepancy is a global position offset. Phase self-calibration
-leaves absolute position unconstrained, and the reconstruction sits $28\,\mu$as
-from the truth; aligning it reduces NRMSE$_I$ from 1.05 to 0.62 and gives a
-normalized cross-correlation of $0.857$. This is expected rather than
-pathological, and is why alignment-tolerant metrics are the appropriate figure of
-merit for self-calibrated reconstructions.
+The residual discrepancy is a global position offset: phase referencing in
+Eq.~\eqref{eq:gains} leaves absolute position undetermined, and the
+reconstruction sits $28\,\mu$as from the truth. Aligning it reduces NRMSE$_I$
+from $1.05$ to $0.62$ and gives a normalized cross-correlation of $0.857$. This
+is expected rather than pathological, and is why alignment-tolerant metrics are
+the right figure of merit for self-calibrated reconstructions.
 
-\subsection{What is not yet established}
+\subsection{What is not established}
 
-The rank $r$ was swept but not calibrated from physics; on the parametric truths
-it is chosen by fit quality. The GRMHD case is fitted, not yet validated across
-the ladder, and no comparison against \kine{} or \resolve{} on identical data has
-been run --- so the claim here is that the objective can be simplified without
-loss, not that the method is better than the alternatives. The seed spread
-reported throughout comes from 2--8 repeats, enough to expose the bimodality of
-the \texttt{fractional} chart but not to put tight error bars on the differences
-between the well-behaved charts.
+The rank $r$ was swept but not calibrated from physics. The GRMHD case is fitted,
+not yet validated across the ladder, and no comparison against \kine or \resolve
+on identical data has been run --- the claim is that the objective can be
+simplified without loss, not that the method is better than the alternatives. The
+seed spread comes from 2--8 repeats, enough to expose the bimodality of chart (a)
+but not to place tight error bars between the well-behaved charts.
 
 \section{Relation to other methods}
 
-\kine{} also represents a movie with a coordinate network and also solves station
-gains, but it fixes Stokes $I$ first and then fits polarization on the frozen
-result. That ordering forecloses a joint solution for leakage terms, which
-requires the total intensity and the polarization to move together. Its published
-description also understates its priors: the released implementation carries
-penalties on the outer field of view, on the light curve, on the static and
-dynamic flux separately, on persistent flux in the dynamic component, and a
-support term that penalizes polarized flux where the intensity is faint --- the
-last of which is functionally identical to a term we arrived at independently.
+\kine also represents a movie with a coordinate network and also solves station
+gains, but it fixes Stokes $I$ first and fits polarization on the frozen result.
+That ordering forecloses a joint solution for leakage, which requires intensity
+and polarization to move together. Its released implementation also carries
+penalties not described in its paper: on the outer field of view, on the light
+curve, on the static and dynamic flux separately, on persistent flux in the
+dynamic component, and a support term functionally identical to
+$R_{\mathrm{sup}}$ in Eq.~\eqref{eq:pen_sup}, which we arrived at independently.
 
-\resolve{} takes the opposite stance, treating the reconstruction as Bayesian
-inference under explicit priors, and does solve calibration and leakage jointly.
-Its strength is precisely the weight of those priors. The contribution we can
-make is therefore neither joint calibration nor prior engineering, but the
-explicit mode representation: a spectrum $\{\Omega_j\}$ with per-Stokes
-amplitudes that can be compared directly against the rates of change in the
+\resolve takes the opposite stance, treating reconstruction as Bayesian inference
+under explicit priors, and does solve calibration and leakage jointly. Its
+strength is precisely the weight of those priors. Our contribution is therefore
+neither joint calibration nor prior engineering, but the explicit mode
+representation: a spectrum $\{\Omega_j\}$ with per-Stokes amplitudes
+$\{b^{\SP}_j\}$ that can be compared directly against the rates of change in the
 source, which neither method produces.
 
 \end{document}
