@@ -41,6 +41,16 @@ def parse_args():
         "feature is ~fov/2^freq, so a thin ring / sharp background edge needs >2",
     )
     ap.add_argument(
+        "--dyn-cap",
+        type=float,
+        default=None,
+        help="hard cap on dynamic-to-static amplitude ratio sqrt(sum|b_j|^2)/b_0, "
+        "imposed by rescaling inside the model (no penalty weight). Bounding the "
+        "spectrum with --theta-max limits only WHERE variability sits; the fit "
+        "answers that by inflating amplitudes. This bounds how MUCH there is, and "
+        "its value comes from a GRMHD library rather than tuning",
+    )
+    ap.add_argument(
         "--theta-max",
         type=float,
         default=1.0,
@@ -464,6 +474,7 @@ def main():
         num_layers=args.num_layers,
         num_frequencies=args.frequencies,
         theta_max=args.theta_max,
+        dyn_cap=args.dyn_cap,
         couple=args.couple,
         n_shared=args.n_shared_modes,
         share_trunk=args.share_trunk,

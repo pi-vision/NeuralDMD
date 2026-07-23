@@ -184,6 +184,7 @@ class NeuralDMD(eqx.Module):
     num_frequencies: int = eqx.field(static=True)
     t_scale: float = eqx.field(static=True)
     eps: float = eqx.field(static=True)
+    dyn_cap: float | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -198,6 +199,7 @@ class NeuralDMD(eqx.Module):
         theta_min: float = 0.0,
         theta_max: float = 1.0,
         t_scale: float = 200.0,
+        dyn_cap: float | None = None,
     ):
         """Build the spatial network and the two temporal networks.
 
@@ -252,6 +254,7 @@ class NeuralDMD(eqx.Module):
             key=keys[2],
         )
         self.eps = 1e-10
+        self.dyn_cap = None if dyn_cap is None else float(dyn_cap)
 
     def spatial_features(self, xy: jax.Array) -> jax.Array:
         """Trunk activations at one coordinate, before the mode head.
@@ -384,6 +387,15 @@ class NeuralDMD(eqx.Module):
         b0, b = self.temporal_b()
         if b_mask is not None:
             b = b * b_mask[: self.r]
+        if self.dyn_cap is not None:
+            # Hard cap on dynamic power relative to the static mode. Bounding the
+            # spectrum (theta_max) limits only WHERE variability sits: the fit
+            # answers a frequency bound by inflating amplitudes instead. This
+            # bounds how MUCH there is. Modes are unit-RMS gauge-fixed, so
+            # sqrt(sum |b_j|^2) / b_0 is the dynamic-to-static amplitude ratio.
+            power = jnp.sqrt(jnp.sum(jnp.abs(b) ** 2) + self.eps)
+            limit = self.dyn_cap * jnp.abs(b0[0])
+            b = b * jnp.minimum(1.0, limit / power)
         return W0, W, Omega, b0, b
 
     def reconstruct(

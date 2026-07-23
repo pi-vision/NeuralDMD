@@ -14,6 +14,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from neuraldmd.model import NeuralDMD, physical_intensities
 
@@ -110,3 +111,44 @@ def test_zero_mask_gives_the_static_reconstruction():
     img, (W0, _, b0, _) = physical_intensities(m, xy, times, 1.0, 0.0, b_mask=jnp.zeros(m.r))
     static = np.asarray(W0[:, 0:1] * b0[0])
     np.testing.assert_allclose(np.asarray(img), np.broadcast_to(static, img.shape), atol=1e-6)
+
+
+def test_dyn_cap_bounds_dynamic_power_and_is_a_no_op_below_it():
+    """The cap bounds sqrt(sum|b_j|^2)/b_0, and leaves a compliant model alone.
+
+    Bounding the spectrum with ``theta_max`` limits only *where* variability sits;
+    a fit answers that by inflating amplitudes instead (measured on ladder data:
+    capping the frequency raised sum|b_j| by 5.5x). This bounds how *much* there is.
+    """
+    xy = _xy()
+    uncapped = _model(r=6)
+    ratio = float(jnp.sqrt(jnp.sum(jnp.abs(uncapped(xy)[4]) ** 2)) / jnp.abs(uncapped(xy)[3][0]))
+
+    tight = NeuralDMD(
+        r=6,
+        hidden_size=32,
+        num_layers=2,
+        num_frequencies=2,
+        temporal_latent_dim=16,
+        temporal_hidden=32,
+        temporal_layers=2,
+        key=jax.random.PRNGKey(0),
+        dyn_cap=ratio / 2,
+    )
+    b0, b = tight(xy)[3], tight(xy)[4]
+    assert float(jnp.sqrt(jnp.sum(jnp.abs(b) ** 2)) / jnp.abs(b0[0])) == pytest.approx(
+        ratio / 2, rel=1e-4
+    )
+
+    loose = NeuralDMD(
+        r=6,
+        hidden_size=32,
+        num_layers=2,
+        num_frequencies=2,
+        temporal_latent_dim=16,
+        temporal_hidden=32,
+        temporal_layers=2,
+        key=jax.random.PRNGKey(0),
+        dyn_cap=ratio * 10,
+    )
+    np.testing.assert_allclose(np.asarray(loose(xy)[4]), np.asarray(uncapped(xy)[4]), rtol=1e-6)
