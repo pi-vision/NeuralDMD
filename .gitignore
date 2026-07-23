@@ -229,3 +229,6 @@ tutorial/pixel/data/
 tutorial/pixel/models/
 tutorial/pixel/checkpoints/
 tutorial/pixel/plots/
+
+# built LaTeX output
+docs/*.pdf
