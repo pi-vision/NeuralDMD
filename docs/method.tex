@@ -13,6 +13,7 @@
 % notation follows paper/main.tex
 \newcommand{\neuralDMD}{\textsc{\small{NeuralDMD}}\xspace}
 \newcommand{\optdmd}{\textsc{\small{optDMD}}\xspace}
+\newcommand{\kine}{\textsc{\small{kine}}\xspace}
 \DeclareMathOperator*{\argmin}{arg\,min}
 \newcommand{\tsc}{t_{\mathrm{scale}}}
 
@@ -159,11 +160,23 @@ The polarization fraction is $m=\tanh p\le1$, so Eq.~\eqref{eq:pli} holds
 \emph{exactly} with no penalty weight; support is inherited from the factor $I$, so
 polarization cannot appear off-source; $\tanh(p)/p$ is smooth through $p=0$; and
 Stokes $V$ is native. The polarization angle follows as
-$\chi=\tfrac12\operatorname{atan2}(U,Q)$. The obvious alternative --- a fraction
-times a unit direction, $Q,U=m_\ell I(\cos2\chi,\sin2\chi)$ --- is not equivalent:
-its direction field must wind $m$ times around the source for an azimuthal pattern
-of order $m$, and winding number cannot change continuously during optimization,
-so the fit either begins in the correct topological sector or never reaches it.
+$\chi=\tfrac12\operatorname{atan2}(U,Q)$.
+
+Two remarks place this chart among the alternatives. First, one must \emph{not}
+build $(Q,U)$ as a fraction times a \emph{unit} direction,
+$Q,U=m_\ell I(\cos2\chi,\sin2\chi)$ with $(\cos2\chi,\sin2\chi)$ constrained to the
+circle: that direction field must then wind $m$ times around the source for an
+azimuthal pattern of order $m$, and winding number cannot change continuously
+during optimization, so the fit either begins in the correct topological sector or
+never reaches it. We tried it and it is bimodal in practice. The remedy is simply
+to leave the two direction components \emph{free} rather than normalized --- which
+is exactly what \kine does (its $\sin2\chi,\cos2\chi$ are independent
+bounded outputs, not a unit vector), and why it does not suffer the obstruction.
+Equation~\eqref{eq:expm} is of that free family: $q,u,v$ are unconstrained.
+Second, within the free family it is the tidiest choice --- $\tanh$ saturates the
+\emph{magnitude} so $P\le I$ holds exactly (a free direction alone gives only
+$P\le\sqrt2\,I$, needing a soft penalty to finish), and $V$ is included at no extra
+cost.
 
 \paragraph{One spectrum, many observables.}
 \label{sec:sharing}
@@ -304,7 +317,7 @@ polarization fraction untouched.
   \node (mu) at (4.6,-0.28) {$w^{u}_j$};
   \node (mv) at (4.6,-0.85) {$w^{v}_j$};
   \node[op, minimum width=18mm] (sum) at (7.6,0) {modal sum\\Eq.~\eqref{eq:fieldI}};
-  \node[res, minimum width=18mm] (cubes) at (11.2,0) {$I,Q,U,V$\\{\scriptsize movie (chart)}};
+  \node[res, minimum width=18mm] (cubes) at (11.2,0) {$I,Q,U,V$\\{\scriptsize movie}};
   \draw[->] (in) -- (W);
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (W) -- (\m); }
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (\m) -- (sum); }
