@@ -66,7 +66,7 @@ so their structure lives in the same places. A \emph{single} coordinate network
 $W$ therefore produces the spatial modes of all of them at once,
 \begin{equation}
   W:\ (x,y)\ \longmapsto\
-  \bigl(\, w^{I}_j(x,y),\ w^{q}_j(x,y),\ w^{u}_j(x,y),\ w^{v}_j(x,y)\,\bigr)_{j=0,\dots,r}.
+  \bigl(\, w^{I}_j(x,y),\ w^{\ell}_j(x,y),\ w^{s}_j(x,y),\ w^{c}_j(x,y)\,\bigr)_{j=0,\dots,r}.
   \label{eq:net}
 \end{equation}
 This is the polarized counterpart of a
@@ -82,25 +82,25 @@ amplitudes.
 \paragraph{The four fields.}
 Each field is real, so its complex modes come in conjugate pairs and the field is
 the real part of a modal sum. We use four such fields --- the total intensity $I$
-and three fields $q,u,v$ that the chart below turns into $Q,U,V$ --- and,
+and three fields $\ell,s,c$ that the chart below turns into $Q,U,V$ --- and,
 crucially, the \emph{same} spectrum $\Omega_j$ drives all four:
 \begin{align}
   I(x,y,t) &= (I_{\max}-I_{\min})\Big[\,w^{I}_0\,b^{I}_0
      + 2\,\Re\!\sum_{j=1}^{r} w^{I}_j\,b^{I}_j\,e^{\Omega_j \tsc t}\,\Big] + I_{\min},
      \label{eq:fieldI}\\[2pt]
-  q(x,y,t) &= w^{q}_0\,b^{q}_0
-     + 2\,\Re\!\sum_{j=1}^{r} w^{q}_j\,b^{q}_j\,e^{\Omega_j \tsc t},
+  \ell(x,y,t) &= w^{\ell}_0\,b^{\ell}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{\ell}_j\,b^{\ell}_j\,e^{\Omega_j \tsc t},
      \label{eq:fieldq}\\[2pt]
-  u(x,y,t) &= w^{u}_0\,b^{u}_0
-     + 2\,\Re\!\sum_{j=1}^{r} w^{u}_j\,b^{u}_j\,e^{\Omega_j \tsc t},
+  s(x,y,t) &= w^{s}_0\,b^{s}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{s}_j\,b^{s}_j\,e^{\Omega_j \tsc t},
      \label{eq:fieldu}\\[2pt]
-  v(x,y,t) &= w^{v}_0\,b^{v}_0
-     + 2\,\Re\!\sum_{j=1}^{r} w^{v}_j\,b^{v}_j\,e^{\Omega_j \tsc t}.
+  c(x,y,t) &= w^{c}_0\,b^{c}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{c}_j\,b^{c}_j\,e^{\Omega_j \tsc t}.
      \label{eq:fieldv}
 \end{align}
 The $j=0$ term is a real static component ($\Omega_0=0$); time is normalized to
 $[0,1]$ over the observing window and $\tsc=200$ sets the range of representable
-rates. The intensity is scaled to physical units in place; $q,u,v$ feed the chart
+rates. The intensity is scaled to physical units in place; $\ell,s,c$ feed the chart
 raw. That the four lines share one $\Omega_j$ is the temporal half of the model's
 sharing --- the spatial half being the one network $W$ --- and only the modes $w$
 and amplitudes $b$ differ between fields. Those are the physics we read off: which
@@ -116,7 +116,7 @@ The spectrum is bounded so that no mode grows without limit, and band-limited,
 \end{equation}
 with $\sigma$ the logistic function ($\alpha_j\in[-200,0]$, $\omega_j\in[0,200]$
 after the $\tsc$ scaling). Each field in Eqs.~\eqref{eq:fieldI}--\eqref{eq:fieldv} is invariant under
-$w_j\to c\,w_j$, $b_j\to b_j/c$; this gauge is fixed by normalizing each mode to
+$w_j\to\kappa\,w_j$, $b_j\to b_j/\kappa$; this gauge is fixed by normalizing each mode to
 unit RMS over the $P$ pixels,
 \begin{equation}
   w_j \;\longleftarrow\; w_j \Big/ \Big(\tfrac{1}{P}\textstyle\sum_{p}|w_j(x_p,y_p)|^2\Big)^{1/2},
@@ -147,14 +147,14 @@ respect neither, and can reach $\chi^2\approx1$ on unphysical images.
 \paragraph{Chart (fractional polarization).}
 \label{sec:chart}
 We parameterize the polarization as a fraction of the total intensity, following
-\kine. The three raw fields $q,u,v$ of
+\kine. The three raw fields $\ell,s,c$ of
 Eqs.~\eqref{eq:fieldq}--\eqref{eq:fieldv} pass through bounded activations to give a
 linear-polarization fraction $m_\ell$ and an angle direction
 $(\sin2\chi,\cos2\chi)$,
 \begin{equation}
-  m_\ell = m_\ell^{\max}\,\sigma(q-\delta), \qquad
-  \sin2\chi = 2\sigma(u)-1, \qquad
-  \cos2\chi = 2\sigma(v)-1,
+  m_\ell = m_\ell^{\max}\,\sigma(\ell-\delta), \qquad
+  \sin2\chi = 2\sigma(s)-1, \qquad
+  \cos2\chi = 2\sigma(c)-1,
   \label{eq:kine}
 \end{equation}
 from which the linear Stokes parameters are
@@ -195,14 +195,14 @@ oscillates at
   \omega^{(\mathcal{P})}_m = (m-2)\,\Omega_{\mathrm{orb}} .
   \label{eq:spin2}
 \end{equation}
-Sharing $\Omega_j$ while keeping the amplitudes $b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$ separate encodes what is common (the
+Sharing $\Omega_j$ while keeping the amplitudes $b^{I}_j,b^{\ell}_j,b^{s}_j,b^{c}_j$ separate encodes what is common (the
 ladder) and leaves free what is not (which rungs each Stokes parameter occupies,
 and with what phase). It also pools the signal-to-noise of all four products onto
 the hardest parameters to identify, which matters because the cross hands carry a
 small fraction of the parallel-hand sensitivity. The index $j$ then means the same
 frequency in every
-field, so per-mode polarimetry is well defined: $|b^{q}_j|$ (and likewise
-$u,v$) is the harmonic weight of that field, and $\arg b^{q}_j-\arg b^{I}_j$ the
+field, so per-mode polarimetry is well defined: $|b^{\ell}_j|$ (and likewise
+$u,v$) is the harmonic weight of that field, and $\arg b^{\ell}_j-\arg b^{I}_j$ the
 phase lag between polarization and intensity. Over a window of $T$ hours the fitted
 frequencies convert to physical rates as
 \begin{equation}
@@ -244,7 +244,11 @@ smoothly and phases referenced to a station $m_0$,
   \label{eq:gains}
 \end{equation}
 with per-station bounds set by that station's known calibration quality, so a gain
-at its bound can still return; a hard clip would kill the gradient there.
+at its bound can still return; a hard clip would kill the gradient there. The
+gains are ordinary parameters of the model: the same automatic-differentiation
+gradient of Eq.~\eqref{eq:chi2} and the same optimizer that fit the sky also fit
+the gains, jointly and from the first step, so calibration is the gradient descent
+that fits the image rather than an alternating self-calibration.
 Referencing the phase removes the degeneracy between a global phase and a
 translation of the image, which also means the absolute position of a
 self-calibrated reconstruction is undetermined.
@@ -312,17 +316,20 @@ polarization fraction untouched.
   ]
   % ---- row 1: sky model ----
   \node[op]  (in)  at (0,0)   {$x,\,y$};
-  \node[net, minimum width=13mm, minimum height=22mm] (W) at (2.1,0) {network\\$W$};
-  \node (mI) at (4.2, 0.85) {$w^{I}_j$};
-  \node (mq) at (4.2, 0.28) {$w^{q}_j$};
-  \node (mu) at (4.2,-0.28) {$w^{u}_j$};
-  \node (mv) at (4.2,-0.85) {$w^{v}_j$};
-  \node[op, minimum width=27mm] (sum) at (7.0,0)
-       {{\scriptsize modal sum $\to (I,q,u,v)$}\\[1pt]$\scriptstyle w_0 b_0+2\Re\sum_j w_j b_j e^{\Omega_j \tsc t}$};
-  \node[res, minimum width=27mm] (chart) at (10.9,0)
-       {{\scriptsize chart}\\[1pt]$\scriptstyle m_\ell{=}\sigma(q),\ (\sin2\chi,\cos2\chi){=}(u,v)$\\[-1pt]
-        $\scriptstyle Q{=}{-}Im_\ell\sin2\chi,\ U{=}Im_\ell\cos2\chi$};
-  \node[res, minimum width=14mm] (cubes) at (14.0,0) {$I,Q,U,V$\\{\scriptsize movie}};
+  \node[net, minimum width=12mm, minimum height=20mm] (W) at (1.9,0) {network\\$W$};
+  \node (mI) at (3.7, 0.75) {$w^{I}_j$};
+  \node (mq) at (3.7, 0.25) {$w^{\ell}_j$};
+  \node (mu) at (3.7,-0.25) {$w^{s}_j$};
+  \node (mv) at (3.7,-0.75) {$w^{c}_j$};
+  \node[op, minimum width=22mm] (sum) at (5.9,0)
+       {{\scriptsize modal sum}\\[1pt]$\scriptstyle w_0 b_0+2\Re\sum_j w_j b_j e^{\Omega_j \tsc t}$};
+  \node[res, minimum width=26mm] (chart) at (9.8,0)
+       {$\scriptstyle m_\ell=m_\ell^{\max}\sigma(\ell)$\\[-2pt]
+        $\scriptstyle \sin2\chi=2\sigma(s)-1$\\[-2pt]
+        $\scriptstyle \cos2\chi=2\sigma(c)-1$\\[-2pt]
+        $\scriptstyle Q=-Im_\ell\sin2\chi$\\[-2pt]
+        $\scriptstyle U=Im_\ell\cos2\chi$};
+  \node[res, minimum width=13mm] (cubes) at (12.5,0) {$I,Q,U,V$\\{\scriptsize video}};
   \draw[->] (in) -- (W);
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (W) -- (\m); }
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (\m) -- (sum); }
@@ -330,25 +337,25 @@ polarization fraction untouched.
   \draw[->] (chart) -- (cubes);
 
   % ---- row 2: amplitudes + shared spectrum ----
-  \node[op]     (amp)  at (2.7,-2.4) {amplitudes\\$b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$};
-  \node[shared] (spec) at (7.0,-2.4) {spectrum $\Omega_j$\ \ {\scriptsize (shared by all)}};
-  \draw[->] (amp)  |- ++(0,0.9) -| (sum.south west);
+  \node[op]     (amp)  at (2.6,-2.3) {amplitudes\\$b^{I}_j,b^{\ell}_j,b^{s}_j,b^{c}_j$};
+  \node[shared] (spec) at (5.9,-2.3) {spectrum $\Omega_j$\ \ {\scriptsize (shared)}};
+  \draw[->] (amp)  |- ++(0,0.85) -| (sum.south west);
   \draw[->] (spec) -- (sum);
 
   % ---- row 3: instrument ----
-  \node[op]  (ft)   at (14.0,-4.4) {$\mathcal{F}$, sample};
-  \node[op]  (pr)   at (10.4,-4.4)
+  \node[op]  (ft)   at (12.5,-4.2) {$\mathcal{F}$, sample};
+  \node[op]  (pr)   at (8.7, -4.2)
        {{\scriptsize products}\\[1pt]$\scriptstyle RR{=}I{+}V,\ RL{=}Q{+}iU$\\[-1pt]$\scriptstyle LL{=}I{-}V,\ LR{=}Q{-}iU$};
-  \node[op]  (gn)   at (6.7, -4.4) {{\scriptsize gains}\\[1pt]$\scriptstyle \hat V\leftarrow g_{p}\hat V\overline{g_{q}}$};
-  \node[res] (chi)  at (3.4, -4.4) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
+  \node[op]  (gn)   at (5.7, -4.2) {{\scriptsize gains}\\[1pt]$\scriptstyle \hat V\leftarrow g_{p}\hat V\overline{g_{q}}$};
+  \node[res] (chi)  at (2.7, -4.2) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
   \draw[->] (cubes) -- (ft);
   \draw[->] (ft) -- (pr);
   \draw[->] (pr) -- (gn);
   \draw[->] (gn) -- (chi);
-  \draw[->, dashed] (chi.west) -- (0.5,-4.4) -- (0.5,-1.1) -- (W.south);
-  \node[lab] at (0.95,-0.55) {gradient};
+  \draw[->, dashed] (chi.west) -- (0.5,-4.2) -- (0.5,-1.0) -- (W.south);
+  \node[lab, anchor=east] at (1.25,-0.72) {gradient};
 \end{tikzpicture}
-\caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes $w^{I}_j,w^{q}_j,w^{u}_j,w^{v}_j$ of the four fields, and each field carries its own amplitudes $b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$. The spectrum $\Omega_j$ is the single quantity shared across all four (shaded), so the mode index $j$ means the same frequency in every Stokes parameter. The modal sum evolves the fields in time (time is not an input to $W$; it enters only through $e^{\Omega_j\tsc t}$), the chart maps them to $I,Q,U,V$, and the Fourier sampling, correlation products and station gains give the model visibilities; the gradient of $\mathcal{L}$ updates $W$.}
+\caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes $w^{I}_j,w^{\ell}_j,w^{s}_j,w^{c}_j$ of the four fields, and each field carries its own amplitudes $b^{I}_j,b^{\ell}_j,b^{s}_j,b^{c}_j$. The spectrum $\Omega_j$ is the single quantity shared across all four (shaded), so the mode index $j$ means the same frequency in every Stokes parameter. The modal sum evolves the fields in time (time is not an input to $W$; it enters only through $e^{\Omega_j\tsc t}$), the chart maps them to $I,Q,U,V$, and the Fourier sampling, correlation products and station gains give the model visibilities; the gradient of $\mathcal{L}$ updates $W$.}
 \label{fig:arch}
 \end{figure}
 
@@ -356,7 +363,7 @@ polarization fraction untouched.
 
 The numbers below were obtained with the free-direction fractional chart above
 (a per-field spatial network, shared spectrum). \kine's exact form and our
-functionally equivalent variants (e.g.\ $Q=I\tanh q$) give the same figures to
+functionally equivalent variants (e.g.\ $Q=I\tanh s$) give the same figures to
 within the seed spread.
 
 On synthetic polarized truths observed with EHT coverage the model recovers the
