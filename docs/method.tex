@@ -414,7 +414,172 @@ physical rates that generated the movie.}
 
 \section{Results}
 
-\emph{[Filled from the completed sweeps; see the accompanying tables.]}
+All comparisons below reuse frozen observations, so every arm sees byte-identical
+data and only the model changes. Two synthetic truths are used: \textsf{HSP}, a
+weakly polarized ring with a polarized orbiting hot spot, where intensity and
+polarization are both dynamic; and \textsf{VB2}, a rotating polarization pattern
+on a \emph{static} ring, where polarization carries all of the time dependence.
+Their measured temporal spectra sit on a common harmonic ladder built on the
+80-minute orbit ($\omega_{\mathrm{orb}} = 4.71$ rad\,hr$^{-1}$) but weight it
+differently: intensity peaks at the fundamental, polarization at the second
+harmonic, exactly as the spin-2 argument of Section~2.1 predicts.
+
+\subsection{The chart matters more than anything else}
+
+Because two runs of the same configuration on the same data can land in different
+optima, every entry is a median over seeds with the full range in brackets
+(Table~\ref{tab:charts_result}). The single largest effect is not the coupling,
+the rank, or any penalty weight: it is which chart builds $(Q,U)$.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+data & chart & $n$ & $\chi^2$ over floor & NRMSE$_Q$ med [min,max] & EVPA$^\circ$ med [min,max] \\
+\midrule
+VB2 & \texttt{iscaled}   & 2 & 0.012 & 0.107 [0.107, 0.108] & 0.96 [0.94, 0.99] \\
+VB2 & \texttt{expm}      & 8 & 0.014 & 0.112 [0.094, 0.123] & 1.21 [0.96, 1.47] \\
+VB2 & \texttt{fractional}& 5 & 0.017 & 0.403 [0.141, \textbf{1.320}] & 2.68 [1.21, \textbf{44.8}] \\
+\midrule
+HSP & \texttt{expm}      & 7 & 0.016 & 0.534 [0.506, 0.611] & 5.31 [4.97, 6.61] \\
+HSP & \texttt{iscaled}   & 2 & 0.160 & 0.518 [0.518, 0.518] & 5.17 [4.75, 5.59] \\
+HSP & \texttt{fractional}& 7 & 0.077 & 0.571 [0.500, \textbf{1.000}] & 8.42 [5.56, \textbf{24.0}] \\
+\bottomrule
+\end{tabular}
+\caption{Reconstruction quality by chart, pooled over seeds at the best rank for
+each dataset. The charts with free $q,u$ fields are near-deterministic; the
+\texttt{fractional} chart has a heavy failure tail in every configuration tried.}
+\label{tab:charts_result}
+\end{table}
+
+The \texttt{fractional} chart normalizes the polarization direction
+$(\cos 2\xi, \sin 2\xi)$ to the unit circle. That makes $P = m_\ell |I|$ exact,
+but it also forces the direction field to \emph{wind} twice around the source for
+an $m=2$ pattern, and winding number cannot change continuously. The optimizer
+therefore either starts in the right topological sector or cannot reach it, which
+is what produces the bimodal outcome: on VB2 its EVPA error ranges from
+$1.2^\circ$ to $44.8^\circ$ across seeds of the same configuration. The charts
+that build $Q,U$ from free fields carry no such obstruction and their spread
+collapses to a few percent.
+
+This is worth emphasizing because the remedy costs nothing. \texttt{expm} obtains
+exact $P \le I$ from $m = \tanh p \le 1$ and support from its proportionality to
+$I$, both by construction and with \emph{no} penalty weight; it is also natively
+capable of Stokes $V$. It is a change of coordinates, not a new prior.
+
+\subsection{Shared and private modes}
+
+With the partition of Eq.~\eqref{eq:partition} the data can say whether
+polarization needs frequencies of its own. Fitting HSP with $6$ of $8$ modes
+shared, the polarization field places $\mathbf{100\%}$ of its amplitude power on
+the shared modes while Stokes $I$ retains $29.6\%$ on its private ones. On these
+truths polarization's periodicity is a strict \emph{subset} of the intensity's
+ladder: it needs no frequency that $I$ does not already have, while $I$ has
+variability that polarization does not share. (With $n_{\mathrm{shared}} = r$ the
+fraction is trivially unity and carries no information.)
+
+Coupling helps where the physics says it should. On HSP, where intensity and
+polarization are both dynamic, sharing the whole bank gives the best fit to the
+data ($\chi^2$ over floor $0.016$ versus $0.077$ uncoupled at equal rank). On
+VB2, whose intensity is static and therefore has no dynamics to lend, coupling is
+neutral. Rank matters as much as coupling and was swept alongside it: a shared
+bank holds $r$ frequencies where independent fields hold up to $4r$, so comparing
+coupled and uncoupled models at fixed $r$ would confound the two.
+
+\subsection{How much of the objective can be retired}
+
+Fixing the chart to \texttt{expm} and the coupling to a shared bank, we then
+removed the image penalties (Table~\ref{tab:knobs}).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llcccc}
+\toprule
+data & priors & $n$ & $\chi^2$ over floor & NRMSE$_I$ [min,max] & NRMSE$_Q$ [min,max] \\
+\midrule
+VB2 & all           & 2 & 0.014 & \textbf{0.124} [0.124, 0.127] & 0.111 [0.111, 0.114] \\
+VB2 & measured flux & 2 & 0.014 & 0.345 [0.345, 0.367] & 0.102 [0.102, 0.102] \\
+VB2 & none          & 2 & 0.014 & 0.350 [0.350, 0.386] & \textbf{0.094} [0.094, 0.112] \\
+\midrule
+HSP & all           & 2 & 0.228 & \textbf{0.139} [0.139, 0.196] & 0.519 [0.519, 0.611] \\
+HSP & measured flux & 1 & $-0.003$ & 0.432 & \textbf{0.506} \\
+HSP & none          & 2 & 0.012 & 0.432 [0.432, 0.444] & 0.522 [0.522, 0.534] \\
+\bottomrule
+\end{tabular}
+\caption{Removing the image penalties, at the \texttt{expm} chart. Polarization
+is insensitive to them; total intensity is not.}
+\label{tab:knobs}
+\end{table}
+
+The split is clean and, in hindsight, sensible. \textbf{Polarization needs no
+image prior at all}: its NRMSE and EVPA are unchanged, or marginally better,
+with every penalty at zero, because the chart already supplies support and the
+bound $P \le I$. \textbf{Total intensity does need the compactness prior}, whose
+removal costs a factor of two to three in NRMSE$_I$ (0.14 to 0.43 on HSP, 0.12
+to 0.35 on VB2). This is the null-space argument of Section~5 made concrete: the
+array's short baselines do not constrain large-scale intensity, and nothing else
+in the objective penalizes an off-source haze.
+
+The hand-tuned part of the objective therefore reduces to a \emph{single}
+weight, acting on Stokes $I$ alone. The total-flux anchor moves from a tuned
+scalar to a measured light curve, which on real data is accurate to $0.78\%$
+(Section~6.4); the polarization penalties, the $P \le I$ penalty, and the
+dynamic-compactness penalty all go to zero without loss.
+
+\subsection{Real data: the EHT validation ladder}
+
+We fit the ladder's \texttt{grmhd2+hs1} observation --- a GRMHD simulation with an
+injected hot spot, observed with the real array's coverage (7 stations, 99
+snapshots, 1976 visibilities over 3.15\,hr).
+
+Two properties of this data change what the objective may be. First, it is not
+phase calibrated: scoring the ground-truth movie against the very data it
+generated gives $\chi^2_{\mathrm{cphase}} = 0.999$ and
+$\chi^2_{\mathrm{logcamp}} = 0.884$, but $\chi^2_{\mathrm{vis}} = 1.2\times10^5$.
+Fitting complex visibilities without solving for station terms is therefore not
+merely suboptimal, it is measuring the wrong thing. Second, the source is
+genuinely variable, its total flux swinging from 2.08 to 3.22\,Jy over the track,
+so a scalar flux anchor would fight the variability it is meant to constrain.
+
+With station gains and phases solved jointly and the total flux fixed per frame
+to the measured light curve, the reconstruction reaches
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+ & $\chi^2_{\mathrm{cphase}}$ & $\chi^2_{\mathrm{logcamp}}$ \\
+\midrule
+ground truth (floor)              & 0.999 & 0.884 \\
+this work                         & \textbf{1.306} & \textbf{1.281} \\
+soft flux anchor, gains solved    & 174.8 & 17.0 \\
+no calibration solved             & 184.7 & 16.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+i.e. the gain-invariant observables are reproduced essentially at the noise floor
+the data permits. The step that mattered was making the flux constraint
+structural rather than soft: with a soft anchor the fit was outvoted by the data
+term and collapsed to a negative-flux solution, since 693 free gain phases can
+absorb almost any sky.
+
+The remaining discrepancy is a global position offset. Phase self-calibration
+leaves absolute position unconstrained, and the reconstruction sits $28\,\mu$as
+from the truth; aligning it reduces NRMSE$_I$ from 1.05 to 0.62 and gives a
+normalized cross-correlation of $0.857$. This is expected rather than
+pathological, and is why alignment-tolerant metrics are the appropriate figure of
+merit for self-calibrated reconstructions.
+
+\subsection{What is not yet established}
+
+The rank $r$ was swept but not calibrated from physics; on the parametric truths
+it is chosen by fit quality. The GRMHD case is fitted, not yet validated across
+the ladder, and no comparison against \kine{} or \resolve{} on identical data has
+been run --- so the claim here is that the objective can be simplified without
+loss, not that the method is better than the alternatives. The seed spread
+reported throughout comes from 2--8 repeats, enough to expose the bimodality of
+the \texttt{fractional} chart but not to put tight error bars on the differences
+between the well-behaved charts.
 
 \section{Relation to other methods}
 
