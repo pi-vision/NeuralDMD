@@ -310,36 +310,43 @@ polarization fraction untouched.
     res/.style = {box, fill=green!10},
     lab/.style = {font=\scriptsize\itshape},
   ]
-  % ---- row 1 (y=0): sky model ----
+  % ---- row 1: sky model ----
   \node[op]  (in)  at (0,0)   {$x,\,y$};
-  \node[net, minimum width=15mm, minimum height=22mm] (W) at (2.3,0) {network\\$W$};
-  \node (mI) at (4.6, 0.85) {$w^{I}_j$};
-  \node (mq) at (4.6, 0.28) {$w^{q}_j$};
-  \node (mu) at (4.6,-0.28) {$w^{u}_j$};
-  \node (mv) at (4.6,-0.85) {$w^{v}_j$};
-  \node[op, minimum width=30mm] (sum) at (7.7,0) {{\scriptsize modal sum}\\[1pt]$\scriptstyle w_0 b_0+2\Re\sum_j w_j b_j\,e^{\Omega_j \tsc t}$};
-  \node[res, minimum width=17mm] (cubes) at (11.6,0) {$I,Q,U,V$\\{\scriptsize movie}};
+  \node[net, minimum width=13mm, minimum height=22mm] (W) at (2.1,0) {network\\$W$};
+  \node (mI) at (4.2, 0.85) {$w^{I}_j$};
+  \node (mq) at (4.2, 0.28) {$w^{q}_j$};
+  \node (mu) at (4.2,-0.28) {$w^{u}_j$};
+  \node (mv) at (4.2,-0.85) {$w^{v}_j$};
+  \node[op, minimum width=27mm] (sum) at (7.0,0)
+       {{\scriptsize modal sum $\to (I,q,u,v)$}\\[1pt]$\scriptstyle w_0 b_0+2\Re\sum_j w_j b_j e^{\Omega_j \tsc t}$};
+  \node[res, minimum width=27mm] (chart) at (10.9,0)
+       {{\scriptsize chart}\\[1pt]$\scriptstyle m_\ell{=}\sigma(q),\ (\sin2\chi,\cos2\chi){=}(u,v)$\\[-1pt]
+        $\scriptstyle Q{=}{-}Im_\ell\sin2\chi,\ U{=}Im_\ell\cos2\chi$};
+  \node[res, minimum width=14mm] (cubes) at (14.0,0) {$I,Q,U,V$\\{\scriptsize movie}};
   \draw[->] (in) -- (W);
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (W) -- (\m); }
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (\m) -- (sum); }
-  \draw[->] (sum) -- (cubes);
+  \draw[->] (sum) -- (chart);
+  \draw[->] (chart) -- (cubes);
 
-  % ---- row 2 (y=-2.4): amplitudes + shared spectrum ----
-  \node[op]     (amp)  at (2.9,-2.4) {amplitudes\\$b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$};
-  \node[shared] (spec) at (7.6,-2.4) {spectrum $\Omega_j$\ \ {\scriptsize (shared by all)}};
+  % ---- row 2: amplitudes + shared spectrum ----
+  \node[op]     (amp)  at (2.7,-2.4) {amplitudes\\$b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$};
+  \node[shared] (spec) at (7.0,-2.4) {spectrum $\Omega_j$\ \ {\scriptsize (shared by all)}};
   \draw[->] (amp)  |- ++(0,0.9) -| (sum.south west);
   \draw[->] (spec) -- (sum);
 
-  % ---- row 3 (y=-4.4): instrument, right to left ----
-  \node[op]  (ft)   at (11.6,-4.4) {$\mathcal{F}$, sample};
-  \node[op]  (pr)   at (7.7, -4.4) {{\scriptsize products}\\[1pt]$\scriptstyle RR{=}I{+}V,\ RL{=}Q{+}iU$\\[-1pt]$\scriptstyle LL{=}I{-}V,\ LR{=}Q{-}iU$};
-  \node[op]  (gn)   at (4.1, -4.4) {{\scriptsize gains}\\[1pt]$\scriptstyle \hat V\leftarrow g_{p}\,\hat V\,\overline{g_{q}}$};
-  \node[res] (chi)  at (1.4, -4.4) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
+  % ---- row 3: instrument ----
+  \node[op]  (ft)   at (14.0,-4.4) {$\mathcal{F}$, sample};
+  \node[op]  (pr)   at (10.4,-4.4)
+       {{\scriptsize products}\\[1pt]$\scriptstyle RR{=}I{+}V,\ RL{=}Q{+}iU$\\[-1pt]$\scriptstyle LL{=}I{-}V,\ LR{=}Q{-}iU$};
+  \node[op]  (gn)   at (6.7, -4.4) {{\scriptsize gains}\\[1pt]$\scriptstyle \hat V\leftarrow g_{p}\hat V\overline{g_{q}}$};
+  \node[res] (chi)  at (3.4, -4.4) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
   \draw[->] (cubes) -- (ft);
   \draw[->] (ft) -- (pr);
   \draw[->] (pr) -- (gn);
   \draw[->] (gn) -- (chi);
-  \draw[->, dashed] (chi.north) |- (2.3,-1.5) node[lab, pos=0.32, left] {gradient} -- (W.south);
+  \draw[->, dashed] (chi.west) -- (0.5,-4.4) -- (0.5,-1.1) -- (W.south);
+  \node[lab] at (0.95,-0.55) {gradient};
 \end{tikzpicture}
 \caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes $w^{I}_j,w^{q}_j,w^{u}_j,w^{v}_j$ of the four fields, and each field carries its own amplitudes $b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$. The spectrum $\Omega_j$ is the single quantity shared across all four (shaded), so the mode index $j$ means the same frequency in every Stokes parameter. The modal sum evolves the fields in time (time is not an input to $W$; it enters only through $e^{\Omega_j\tsc t}$), the chart maps them to $I,Q,U,V$, and the Fourier sampling, correlation products and station gains give the model visibilities; the gradient of $\mathcal{L}$ updates $W$.}
 \label{fig:arch}
