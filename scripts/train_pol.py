@@ -236,6 +236,15 @@ def parse_args():
     )
     ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
     ap.add_argument(
+        "--flux-curve",
+        choices=("measured",),
+        default=None,
+        help="anchor the total flux SOFTLY to the per-frame light curve measured "
+        "from intra-site baselines, instead of the scalar --flux. Use whenever the "
+        "source varies (GRMHD, a flaring Sgr A*): one number would fight the real "
+        "variability, while the measured curve is a data product, not a tuned knob",
+    )
+    ap.add_argument(
         "--fix-flux",
         choices=("measured", "given"),
         default=None,
@@ -426,6 +435,21 @@ def main():
         )
         print(f"Total flux FIXED, {src}", flush=True)
 
+    # Soft anchor on a MEASURED light curve. A real source varies -- the ladder's
+    # GRMHD truth swings 2.08-3.22 Jy over one track -- so anchoring every frame to
+    # one number would fight the variability it is meant to constrain.
+    flux_target = args.flux
+    if args.flux_curve == "measured":
+        from neuraldmd.data.lightcurve import measure_lightcurve
+
+        curve = measure_lightcurve(op)
+        flux_target = curve
+        print(
+            f"Flux anchor: measured curve, {curve.mean():.4f} Jy mean, "
+            f"range [{curve.min():.4f}, {curve.max():.4f}]",
+            flush=True,
+        )
+
     model = PolarizedNeuralDMD(
         stokes,
         r=args.r,
@@ -528,7 +552,7 @@ def main():
         optimizer_name=args.optimizer,
         lr_decay_rate=args.lr_decay_rate,
         lr_decay_steps=args.lr_decay_steps,
-        flux_target=args.flux,
+        flux_target=flux_target,
         flux_weight=args.flux_weight,
         compact_weight=args.compact_weight,
         compact_pol_weight=args.compact_pol_weight,

@@ -34,10 +34,58 @@ CO_LOCATED_SITES: tuple[frozenset[str], ...] = (
     frozenset({"SMA", "JCMT", "SMAR"}),
 )
 
+#: Real EHT uvfits label stations by two-letter code, not by name. Without this,
+#: an array that plainly has intra-site baselines looks like it has none and the
+#: flux scale silently falls back to being fitted.
+STATION_ALIASES: dict[str, str] = {
+    "AA": "ALMA",
+    "AP": "APEX",
+    "JC": "JCMT",
+    "SM": "SMA",
+    "SR": "SMAR",
+    "SMAP": "SMA",
+    "AZ": "SMT",
+    "LM": "LMT",
+    "SP": "SPT",
+    "PV": "PV",
+    "GL": "GLT",
+    "KT": "KP",
+}
+
+
+def canonical_station(name: str) -> str:
+    """Map a station label to its canonical name.
+
+    Parameters
+    ----------
+    name : str
+        Station label, either a full name or a two-letter EHT code.
+
+    Returns
+    -------
+    str
+        Upper-case canonical name, unchanged if already canonical.
+    """
+    up = str(name).upper()
+    return STATION_ALIASES.get(up, up)
+
 
 def _intra_site_mask(stations: tuple[str, ...], bl_station_ids: np.ndarray) -> np.ndarray:
-    """``(T, M)`` bool: True where a baseline joins two dishes at the same site."""
-    upper = [str(s).upper() for s in stations]
+    """``(T, M)`` bool: True where a baseline joins two dishes at the same site.
+
+    Parameters
+    ----------
+    stations : tuple of str
+        Station labels in gain-table order.
+    bl_station_ids : np.ndarray
+        ``(T, M, 2)`` station indices per baseline.
+
+    Returns
+    -------
+    np.ndarray
+        ``(T, M)`` boolean mask.
+    """
+    upper = [canonical_station(s) for s in stations]
     site_of: dict[int, int] = {}
     for idx, name in enumerate(upper):
         for g, group in enumerate(CO_LOCATED_SITES):

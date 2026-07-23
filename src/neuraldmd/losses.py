@@ -256,13 +256,15 @@ def polarized_loss_fn(
     p_le_i_weight : float
         Weight for the optional ``sum(relu(sqrt(Q^2+U^2+V^2) - I)^2)`` penalty
         (default 0.0 -> disabled).
-    flux_target : float or None
-        Known total flux [Jy]. When set, adds
-        ``flux_weight * mean_t(((sum_p I[p, t] - flux_target) / flux_target)^2)``
-        -- a lightcurve anchor. The array has no zero-spacing baseline, so total
-        flux is only weakly constrained by the data and can otherwise leak into
-        a large-scale haze (and, later, into station gain amplitudes). ``None``
-        disables (default).
+    flux_target : float, array_like or None
+        Known total flux [Jy], either a scalar or a per-frame curve spanning the
+        normalized time axis (sampled at this batch's times). When set, adds
+        ``flux_weight * mean_t(((sum_p I[p, t] - F_t) / F_t)^2)`` -- a lightcurve
+        anchor. The array has no zero-spacing baseline, so total flux is only
+        weakly constrained by the data and can otherwise leak into a large-scale
+        haze (and, later, into station gain amplitudes). Pass a curve whenever the
+        source is genuinely variable; a scalar would fight the real variability.
+        ``None`` disables (default).
     flux_weight : float
         Weight of the total-flux anchor.
     compact_weight : float
@@ -366,9 +368,17 @@ def polarized_loss_fn(
 
     if flux_target is not None:
         # total-flux (lightcurve) anchor: images are Jy/pixel, so the per-frame
-        # pixel sum is the model's zero-spacing flux
+        # pixel sum is the model's zero-spacing flux. A scalar target pins every
+        # frame to the same value; a curve is sampled at this batch's times, which
+        # is what a genuinely variable source (GRMHD, flaring Sgr A*) needs.
+        ft = jnp.asarray(flux_target)
+        if ft.ndim == 0:
+            target_t = ft
+        else:
+            grid = jnp.linspace(0.0, 1.0, ft.size)
+            target_t = jnp.interp(time_indices, grid, ft)
         tot_flux = jnp.sum(images["I"], axis=0)  # (T,)
-        flux_penalty = jnp.mean(((tot_flux - flux_target) / flux_target) ** 2)
+        flux_penalty = jnp.mean(((tot_flux - target_t) / target_t) ** 2)
     else:
         flux_penalty = jnp.asarray(0.0)
 
