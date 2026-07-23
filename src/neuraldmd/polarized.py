@@ -255,9 +255,11 @@ class PolarizedNeuralDMD(eqx.Module):
         """Per-field keyword arguments implementing the configured coupling.
 
         A coupled field's spectrum is ``concat(shared[:n_shared], own[n_shared:])``,
-        so ``n_shared=0`` reduces to the uncoupled model and ``n_shared=r`` shares
-        the whole bank. The remaining private modes are what let polarization carry
-        a periodicity that Stokes I does not have.
+        so ``n_shared=r`` shares the whole bank and the private modes are what let
+        polarization carry a periodicity that Stokes I does not have. Trunk sharing
+        is independent of the spectrum: ``share_trunk`` with ``n_shared=0`` is one
+        spatial network feeding every Stokes head while each field keeps its own
+        fully independent spectrum.
 
         Parameters
         ----------
@@ -272,24 +274,39 @@ class PolarizedNeuralDMD(eqx.Module):
         """
         kw = {name: {} for name in self.FIELD_NAMES}
         owner = self._bank_owner()
-        if owner is None or self.n_shared <= 0:
+        if owner is None:
             return kw
 
-        alphas, thetas = owner.temporal_omega()
-        shared_omega = alphas + 1j * thetas
+        # Trunk sharing and spectrum sharing are independent axes. share_trunk with
+        # n_shared=0 is "one spatial MLP, but every Stokes keeps its own spectrum";
+        # n_shared>0 without share_trunk shares the spectrum but not the trunk.
+        share_omega = self.n_shared > 0
+        if not share_omega and not self.share_trunk:
+            return kw
+
         feats = jax.vmap(owner.spatial_features)(xy) if self.share_trunk else None
+        shared_omega = None
+        if share_omega:
+            alphas, thetas = owner.temporal_omega()
+            shared_omega = alphas + 1j * thetas
 
         for name in self._coupled_names():
             field = getattr(self, name)
             if field is None:
                 continue
-            if self.n_shared >= field.r:
-                omega = shared_omega
-            else:
-                own_a, own_t = field.temporal_omega()
-                own = own_a + 1j * own_t
-                omega = jnp.concatenate([shared_omega[: self.n_shared], own[self.n_shared :]])
-            kw[name] = {"omega": omega, "spatial_features": feats}
+            entry: dict = {}
+            if self.share_trunk:
+                entry["spatial_features"] = feats
+            if share_omega:
+                if self.n_shared >= field.r:
+                    entry["omega"] = shared_omega
+                else:
+                    own_a, own_t = field.temporal_omega()
+                    own = own_a + 1j * own_t
+                    entry["omega"] = jnp.concatenate(
+                        [shared_omega[: self.n_shared], own[self.n_shared :]]
+                    )
+            kw[name] = entry
         return kw
 
     def aligned_modes(self, xy, times):

@@ -237,6 +237,25 @@ def test_shared_trunk_is_driven_by_polarization_and_pol_trunks_go_quiet():
     assert np.any(borrower_head != 0), "per-field head must stay trainable"
 
 
+def test_shared_trunk_with_n_shared_zero_shares_space_not_spectrum():
+    """One MLP, independent Omega: shared spatial trunk, private per-field spectra.
+
+    ``share_trunk`` with ``n_shared=0`` shares the owner's trunk (space) while
+    leaving every field's own spectrum trainable (frequencies stay private) --
+    the opposite of ``n_shared=r``, which freezes the borrowed spectrum.
+    """
+    m = _model(couple="all", share_trunk=True, n_shared=0)
+    grad = eqx.filter_grad(_crosshand_loss)(m)
+    # space IS shared: pol data drives the owner's trunk, the borrower's is inert
+    assert np.any(np.asarray(grad.intensity.mlp.in_proj.weight) != 0), "trunk not shared"
+    assert np.all(np.asarray(grad.frac.mlp.in_proj.weight) == 0), "borrowed trunk not inert"
+    assert np.any(np.asarray(grad.frac.mlp.out_head.weight) != 0), "head must stay trainable"
+    # spectrum is NOT shared: each field keeps training its own Omega
+    assert np.any(np.asarray(grad.frac.temporal_omega.latent) != 0), (
+        "n_shared=0 must keep each field's spectrum private"
+    )
+
+
 # --------------------------------------------------------------------------
 # aligned_modes
 # --------------------------------------------------------------------------
