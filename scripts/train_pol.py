@@ -110,6 +110,13 @@ def parse_args():
     # mring+hsCW) instead of self-generating one; the ground truth is rebuilt on
     # the observation's own clock for evaluation
     ap.add_argument("--uvfits", default=None, help="external uvfits to fit (skips generation)")
+    ap.add_argument(
+        "--truth-hdf5",
+        default=None,
+        help="validation-ladder ground-truth movie to score against (uvfits mode). "
+        "Without it, uvfits mode rebuilds a synthetic parametric truth, which is "
+        "meaningless for a ladder dataset",
+    )
     ap.add_argument("--syserr", type=float, default=0.0, help="fractional syserr added to sigma")
     ap.add_argument(
         "--truth-frames", type=int, default=200, help="truth-movie frames (uvfits mode)"
@@ -336,19 +343,32 @@ def main():
             syserr=args.syserr,
         )
         op.to_obs_dir(data_dir)
-        # rebuild the canonical truth on the observation's own clock: uniform
-        # frames spanning first->last scan; training uses the actual scan times
         t0, t1 = op.time_anchors_hr
-        print(f"Rebuilding truth movie on {t0:.3f}..{t1:.3f} UT ...", flush=True)
-        movie = make_mring_hs_pol_movie(
-            npix=args.npix,
-            fov_uas=args.fov_uas,
-            num_frames=args.truth_frames,
-            tstart_hr=t0,
-            tstop_hr=t1,
-            linpol_frac=args.frac_pol,
-        )
-        save_truth_npz(movie, data_dir, args.npix, args.fov_uas)
+        if args.truth_hdf5:
+            from neuraldmd.data.ladder import write_truth_npz
+
+            print(f"Ladder truth {args.truth_hdf5} on {t0:.3f}..{t1:.3f} UT ...", flush=True)
+            info = write_truth_npz(
+                args.truth_hdf5, data_dir, args.npix, op.times, anchors_hr=(t0, t1)
+            )
+            print(
+                f"  fov {info['fov_uas']:.1f} uas, flux {info['flux_mean']:.3f} "
+                f"+- {info['flux_std']:.3f} Jy",
+                flush=True,
+            )
+        else:
+            # rebuild the canonical truth on the observation's own clock: uniform
+            # frames spanning first->last scan; training uses the actual scan times
+            print(f"Rebuilding truth movie on {t0:.3f}..{t1:.3f} UT ...", flush=True)
+            movie = make_mring_hs_pol_movie(
+                npix=args.npix,
+                fov_uas=args.fov_uas,
+                num_frames=args.truth_frames,
+                tstart_hr=t0,
+                tstop_hr=t1,
+                linpol_frac=args.frac_pol,
+            )
+            save_truth_npz(movie, data_dir, args.npix, args.fov_uas)
     else:
         print("Generating polarized dataset ...", flush=True)
         op = generate_polarized_dataset(
