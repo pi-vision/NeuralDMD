@@ -289,44 +289,41 @@ polarization fraction untouched.
 \centering
 \begin{tikzpicture}[
     font=\small, x=1cm, y=1cm, >={Latex[length=2mm]},
-    box/.style = {draw, rounded corners=2pt, minimum height=8mm, align=center, inner sep=3pt},
+    box/.style = {draw, rounded corners=2pt, minimum height=7mm, align=center, inner sep=3pt},
     net/.style = {box, fill=blue!8},
     op/.style  = {box, fill=black!4},
     res/.style = {box, fill=green!10},
     lab/.style = {font=\scriptsize\itshape},
   ]
-  % inputs
-  \node[op] (in) at (0,0) {$x,\,y$};
-  % the single network
-  \node[net, minimum width=17mm, minimum height=15mm] (W) at (2.6,0) {network\\$W$};
-  % outputs: spatial modes of every Stokes
-  \node (out) at (5.9,0) {$w_j,\,b_j$};
-  % modal sum + spectrum/amplitudes feeding it
-  \node[op] (sp)  at (2.6,-2.3) {$\Omega_j$};
-  \node[op, minimum width=22mm] (sum) at (8.9,0) {modal sum\\Eq.~\eqref{eq:fieldI}};
-  \node[res, minimum width=20mm] (cubes) at (12.6,0) {$I,Q,U,V$\\{\scriptsize movie}};
-
+  % one network, four field outputs
+  \node[op] (in) at (0,-1.05) {$x,\,y$};
+  \node[net, minimum width=15mm, minimum height=20mm] (W) at (2.4,-1.05) {network\\$W$};
+  \node (oI) at (4.7, 0.15) {$w^{I}_j$};
+  \node (oq) at (4.7,-0.75) {$w^{q}_j$};
+  \node (ou) at (4.7,-1.35) {$w^{u}_j$};
+  \node (ov) at (4.7,-2.25) {$w^{v}_j$};
   \draw[->] (in) -- (W);
-  \draw[->] (W) -- (out);
-  \draw[->] (out) -- (sum);
-  \draw[->] (sp) -| (sum);
+  \foreach \o in {oI,oq,ou,ov} { \draw[->] (W) -- (\o); }
+  \node[lab, align=left] at (4.75,-3.05) {modes of\\ $I,q,u,v$};
+
+  % shared spectrum + amplitudes into the modal sum
+  \node[op] (om) at (7.6,-2.5) {$\Omega_j,\ b_j$};
+  \node[op, minimum width=20mm] (sum) at (7.6,-1.05) {modal sum\\Eq.~\eqref{eq:fieldI}};
+  \node[res, minimum width=17mm] (cubes) at (11.1,-1.05) {$I,Q,U,V$\\{\scriptsize (chart)}};
+  \foreach \o in {oI,oq,ou,ov} { \draw[->] (\o) -- (sum); }
+  \draw[->] (om) -- (sum);
   \draw[->] (sum) -- (cubes);
 
-  % measurement chain
-  \node[op] (ft)   at (12.6,-2.3) {$\mathcal{F}$, sample};
-  \node[op] (prod) at (8.9,-2.3) {products\\Eq.~\eqref{eq:products}};
-  \node[op] (gain) at (5.5,-2.3) {gains\\Eq.~\eqref{eq:rime}};
-  \node[res](chi)  at (2.6,-2.3) {}; % placeholder, replaced below
-  \node[res](chi)  at (0.0,-2.3) {$\displaystyle\mathcal{L}=\!\!\sum_{p}\chi^2_p$};
-
+  % measurement + loss + gradient
+  \node[op] (ft)   at (11.1,-3.9) {$\mathcal{F}$, sample};
+  \node[op] (prod) at (7.6, -3.9) {products\\Eq.~\eqref{eq:products}};
+  \node[op] (gain) at (5.0, -3.9) {gains\\Eq.~\eqref{eq:rime}};
+  \node[res](chi)  at (1.4, -3.9) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
   \draw[->] (cubes) -- (ft);
   \draw[->] (ft) -- (prod);
   \draw[->] (prod) -- (gain);
   \draw[->] (gain) -- (chi);
-  % gradient feedback
-  \draw[->, dashed] (chi) -- (W) node[lab, midway, left] {gradient};
-
-  \node[lab] at (5.9,0.5) {spatial modes};
+  \draw[->, dashed] (chi.south) |- ++(0,-0.5) -| (W.south) node[lab, pos=0.25, below] {gradient descent};
 \end{tikzpicture}
 \caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes of every
 Stokes parameter. A shared spectrum $\Omega_j$ and per-Stokes amplitudes
