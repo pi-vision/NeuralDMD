@@ -14,7 +14,6 @@
 \newcommand{\neuralDMD}{\textsc{\small{NeuralDMD}}\xspace}
 \newcommand{\optdmd}{\textsc{\small{optDMD}}\xspace}
 \DeclareMathOperator*{\argmin}{arg\,min}
-\newcommand{\SP}{\mathrm{S}}
 \newcommand{\tsc}{t_{\mathrm{scale}}}
 
 \title{Polarimetric \neuralDMD}
@@ -64,10 +63,11 @@ The four fields we need --- intensity plus three for polarization
 so their structure lives in the same places. A \emph{single} coordinate network
 $W$ therefore produces the spatial modes of all of them at once,
 \begin{equation}
-  W:\ (x,y)\ \longmapsto\ \bigl\{\,w^{\SP}_j(x,y)\,\bigr\}_{\SP,\,j},
+  W:\ (x,y)\ \longmapsto\
+  \bigl(\, w^{I}_j(x,y),\ w^{q}_j(x,y),\ w^{u}_j(x,y),\ w^{v}_j(x,y)\,\bigr)_{j=0,\dots,r}.
   \label{eq:net}
 \end{equation}
-for $\SP\in\{I,q,u,v\}$ and $j=0,\dots,r$. This is the polarized counterpart of a
+This is the polarized counterpart of a
 single coordinate network mapping $(x,y,t)$ to the Stokes parameters, with one
 essential difference: our network does not take time as an input. The time
 dependence is supplied by the modal sum below, so the spectrum $\Omega_j$ is an
@@ -77,23 +77,33 @@ appears where intensity structure appears --- a prior carried by the architectur
 not by a penalty. What stays per-field is only the modes it reads out and their
 amplitudes.
 
-\paragraph{Real-valued fields.}
-Each physical field is real, so its complex modes occur in conjugate pairs. Write
-$\SP$ for a field label and
-\begin{equation}
-  f^{\SP}(x,y,t) = w^{\SP}_0(x,y)\,b^{\SP}_0
-  \;+\; 2\,\Re\!\left(\sum_{j=1}^{r} w^{\SP}_j(x,y)\,b^{\SP}_j\,
-        e^{\Omega_j \tsc t}\right),
-  \label{eq:field}
-\end{equation}
-where the $j=0$ term is a real static component ($\Omega_0=0$). Time is normalized
-to $[0,1]$ over the observing window and $\tsc=200$ sets the range of representable
-rates. The spectrum $\Omega_j$ carries \emph{no} field label: one set of
-frequencies serves every Stokes parameter, just as the one network serves them in
-space. What is separate is only the spatial modes $w^{\SP}_j$ and the complex
-amplitudes $b^{\SP}_j$ --- and those are exactly the physics we want to read off:
-which spatial pattern and which harmonic each Stokes parameter occupies, and with
-what relative phase.
+\paragraph{The four fields.}
+Each field is real, so its complex modes come in conjugate pairs and the field is
+the real part of a modal sum. We use four such fields --- the total intensity $I$
+and three fields $q,u,v$ that the chart below turns into $Q,U,V$ --- and,
+crucially, the \emph{same} spectrum $\Omega_j$ drives all four:
+\begin{align}
+  I(x,y,t) &= (I_{\max}-I_{\min})\Big[\,w^{I}_0\,b^{I}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{I}_j\,b^{I}_j\,e^{\Omega_j \tsc t}\,\Big] + I_{\min},
+     \label{eq:fieldI}\\[2pt]
+  q(x,y,t) &= w^{q}_0\,b^{q}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{q}_j\,b^{q}_j\,e^{\Omega_j \tsc t},
+     \label{eq:fieldq}\\[2pt]
+  u(x,y,t) &= w^{u}_0\,b^{u}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{u}_j\,b^{u}_j\,e^{\Omega_j \tsc t},
+     \label{eq:fieldu}\\[2pt]
+  v(x,y,t) &= w^{v}_0\,b^{v}_0
+     + 2\,\Re\!\sum_{j=1}^{r} w^{v}_j\,b^{v}_j\,e^{\Omega_j \tsc t}.
+     \label{eq:fieldv}
+\end{align}
+The $j=0$ term is a real static component ($\Omega_0=0$); time is normalized to
+$[0,1]$ over the observing window and $\tsc=200$ sets the range of representable
+rates. The intensity is scaled to physical units in place; $q,u,v$ feed the chart
+raw. That the four lines share one $\Omega_j$ is the temporal half of the model's
+sharing --- the spatial half being the one network $W$ --- and only the modes $w$
+and amplitudes $b$ differ between fields. Those are the physics we read off: which
+spatial pattern and which harmonic each field occupies, and with what relative
+phase. Sec.~\ref{sec:sharing} argues for the shared spectrum.
 
 \paragraph{Constraints imposed by construction.}
 The spectrum is bounded so that no mode grows without limit, and band-limited,
@@ -103,7 +113,7 @@ The spectrum is bounded so that no mode grows without limit, and band-limited,
   \label{eq:spectrum}
 \end{equation}
 with $\sigma$ the logistic function ($\alpha_j\in[-200,0]$, $\omega_j\in[0,200]$
-after the $\tsc$ scaling). Equation~\eqref{eq:field} is invariant under
+after the $\tsc$ scaling). Each field in Eqs.~\eqref{eq:fieldI}--\eqref{eq:fieldv} is invariant under
 $w_j\to c\,w_j$, $b_j\to b_j/c$; this gauge is fixed by normalizing each mode to
 unit RMS over the $P$ pixels,
 \begin{equation}
@@ -134,20 +144,15 @@ respect neither, and can reach $\chi^2\approx1$ on unphysical images.
 
 \paragraph{Chart.}
 \label{sec:chart}
-We therefore build the polarized sky from four raw fields
-$f^{I},f^{q},f^{u},f^{v}$ of the form of Eq.~\eqref{eq:field}. The intensity is
-scaled to physical units,
+The polarization is built from the three fields $q,u,v$ of
+Eqs.~\eqref{eq:fieldq}--\eqref{eq:fieldv} by the matrix-exponential fractional
+form. With
 \begin{equation}
-  I = f^{I}\,(I_{\max}-I_{\min})+I_{\min},
-  \label{eq:iscale}
-\end{equation}
-and the polarization follows the matrix-exponential fractional form: with
-\begin{equation}
-  p=\sqrt{(f^{q})^2+(f^{u})^2+(f^{v})^2},
+  p=\sqrt{q^2+u^2+v^2},
   \label{eq:pmag}
 \end{equation}
 \begin{equation}
-  \boxed{\;(Q,U,V) \;=\; I\,\frac{\tanh p}{p}\,\bigl(f^{q},f^{u},f^{v}\bigr).\;}
+  \boxed{\;(Q,U,V) \;=\; I\,\frac{\tanh p}{p}\,\bigl(q,\,u,\,v\bigr).\;}
   \label{eq:expm}
 \end{equation}
 The polarization fraction is $m=\tanh p\le1$, so Eq.~\eqref{eq:pli} holds
@@ -176,14 +181,14 @@ oscillates at
   \omega^{(\mathcal{P})}_m = (m-2)\,\Omega_{\mathrm{orb}} .
   \label{eq:spin2}
 \end{equation}
-Sharing $\Omega_j$ while keeping $b^{\SP}_j$ separate encodes what is common (the
+Sharing $\Omega_j$ while keeping the amplitudes $b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$ separate encodes what is common (the
 ladder) and leaves free what is not (which rungs each Stokes parameter occupies,
 and with what phase). It also pools the signal-to-noise of all four products onto
 the hardest parameters to identify, which matters because the cross hands carry a
 small fraction of the parallel-hand sensitivity. The index $j$ then means the same
 frequency in every
-Stokes parameter, so per-mode polarimetry is well defined: $|b^{\SP}_j|$ is the
-harmonic weight of Stokes $\SP$, and $\arg b^{\mathcal{P}}_j-\arg b^{I}_j$ the
+field, so per-mode polarimetry is well defined: $|b^{q}_j|$ (and likewise
+$u,v$) is the harmonic weight of that field, and $\arg b^{q}_j-\arg b^{I}_j$ the
 phase lag between polarization and intensity. Over a window of $T$ hours the fitted
 frequencies convert to physical rates as
 \begin{equation}
@@ -197,10 +202,10 @@ implicit) but in the azimuthal phase gradient of $\arg w_j$.
 \section{Forward model}
 
 Figure~\ref{fig:arch} shows the whole chain. An interferometer samples the
-Fourier transform of the sky. Writing $A_t$ for the
-operator mapping frame $t$ to its sampled visibilities, each Stokes parameter gives
-$\hat V^{\SP}_t=A_t\,\SP_t$, and circular feeds combine them into the measured
-correlation products
+Fourier transform of the sky. Writing $A_t$ for the operator mapping frame $t$ to
+its sampled visibilities, it maps each Stokes image to its visibilities,
+$\hat V^{I}_t=A_t\,I_t$ and likewise $\hat V^{Q}_t,\hat V^{U}_t,\hat V^{V}_t$;
+circular feeds combine them into the measured correlation products
 \begin{equation}
   \hat V^{RR}=\hat V^{I}+\hat V^{V},\quad
   \hat V^{LL}=\hat V^{I}-\hat V^{V},\quad
@@ -295,10 +300,10 @@ polarization fraction untouched.
   % the single network
   \node[net, minimum width=17mm, minimum height=15mm] (W) at (2.6,0) {network\\$W$};
   % outputs: spatial modes of every Stokes
-  \node (out) at (5.9,0) {$\{w^{\SP}_j\}$};
+  \node (out) at (5.9,0) {$w_j,\,b_j$};
   % modal sum + spectrum/amplitudes feeding it
-  \node[op] (sp)  at (2.6,-2.3) {$\Omega_j,\ b^{\SP}_j$};
-  \node[op, minimum width=22mm] (sum) at (8.9,0) {modal sum\\Eq.~\eqref{eq:field}};
+  \node[op] (sp)  at (2.6,-2.3) {$\Omega_j$};
+  \node[op, minimum width=22mm] (sum) at (8.9,0) {modal sum\\Eq.~\eqref{eq:fieldI}};
   \node[res, minimum width=20mm] (cubes) at (12.6,0) {$I,Q,U,V$\\{\scriptsize movie}};
 
   \draw[->] (in) -- (W);
@@ -325,7 +330,7 @@ polarization fraction untouched.
 \end{tikzpicture}
 \caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes of every
 Stokes parameter. A shared spectrum $\Omega_j$ and per-Stokes amplitudes
-$b^{\SP}_j$ evolve them in time through the modal sum, giving the Stokes movie.
+amplitudes $b_j$ evolve them in time through the modal sum, giving the Stokes movie.
 The chart, Fourier sampling, correlation products and station gains then turn it
 into the model visibilities compared with the data; the gradient of $\mathcal{L}$
 updates $W$. Time is not an input to $W$: it enters only through
@@ -344,7 +349,7 @@ On synthetic polarized truths observed with EHT coverage the model recovers the
 polarization structure with NRMSE$_Q\approx0.11$ and a polarization-angle error
 near $1^\circ$, and the recovered frequencies fall on harmonics of the injected
 orbit through Eq.~\eqref{eq:physfreq}. Giving each field private modes tests the
-assumption behind Eq.~\eqref{eq:field} rather than asserting it: with $6$ of $8$
+assumption behind Eqs.~\eqref{eq:fieldI}--\eqref{eq:fieldv} rather than asserting it: with $6$ of $8$
 modes shared, the polarization fields place $100\%$ of their power on the shared
 modes and Stokes $I$ retains $30\%$ on its private ones.
 
