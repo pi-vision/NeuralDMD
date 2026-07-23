@@ -14,12 +14,39 @@ from .physics.stokes import stokes_to_products_matrix
 
 
 def sparsity_loss(W0: jax.Array, W: jax.Array) -> jax.Array:
-    """L1 penalty encouraging sparse spatial modes / amplitudes."""
+    """L1 penalty encouraging sparse spatial modes / amplitudes.
+
+    Parameters
+    ----------
+    W0 : jax.Array
+        Static mode (or static amplitude).
+    W : jax.Array
+        Dynamic modes (or dynamic amplitudes).
+
+    Returns
+    -------
+    jax.Array
+        Scalar ``mean|W0| + mean|W|``.
+    """
     return jnp.mean(jnp.abs(W0)) + jnp.mean(jnp.abs(W))
 
 
 def calculate_closure_phases(vis_pred: jax.Array, triangles: jax.Array) -> jax.Array:
-    """Predicted bispectrum phasors for the stored (index, sign) triangles."""
+    """Predicted bispectrum phasors for the stored (index, sign) triangles.
+
+    Parameters
+    ----------
+    vis_pred : jax.Array
+        ``(T_b, M)`` predicted complex visibilities.
+    triangles : jax.Array
+        ``(T_b, n_tri, 3, 2)`` baseline index and sign per triangle leg; a
+        negative sign conjugates that leg.
+
+    Returns
+    -------
+    jax.Array
+        ``(T_b, n_tri)`` unit-modulus bispectrum phasors.
+    """
     idxs = triangles[..., 0]  # (T_b, n_tri, 3)
     signs = triangles[..., 1]
 
@@ -62,6 +89,39 @@ def loss_fn(
 
     ``frame_batch`` (ground-truth frames) is used only for the reconstruction
     diagnostic in aux -- it does not influence the gradient.
+
+    Parameters
+    ----------
+    model : NeuralDMD
+        Scalar Stokes-I model.
+    xy : jax.Array
+        ``(P, 2)`` pixel coordinates.
+    frame_batch : jax.Array
+        ``(T_b, P)`` ground-truth frames (diagnostic only).
+    vis_target_batch, vis_sigma_batch, vis_mask_batch : jax.Array
+        ``(T_b, M)`` visibility targets, errors, and 0/1 mask.
+    amp_target_batch, amp_sigma_batch : jax.Array
+        ``(T_b, M)`` amplitude targets and errors (diagnostic only).
+    cp_target_batch, cp_sigma_batch, cp_mask_batch : jax.Array
+        ``(T_b, n_tri)`` closure-phase targets, errors, and mask (diagnostic only).
+    triangles : jax.Array
+        ``(T_b, n_tri, 3, 2)`` closure triangle (index, sign) pairs.
+    A_batch : jax.Array
+        ``(T_b, M, P)`` image->visibility operator.
+    time_indices : jax.Array
+        ``(T_b,)`` normalized frame times.
+    frame_max, frame_min : float
+        Output scaling to physical units.
+    neg_weight, w_sparse_weight, b_sparse_weight : float
+        Weights for the negativity and the mode / amplitude sparsity penalties.
+
+    Returns
+    -------
+    total : jax.Array
+        Scalar loss.
+    aux : tuple
+        ``(reconstruction_loss, chi2_vis, chi2_amp, chi2_cp)``; only ``chi2_vis``
+        drives the gradient, the rest are diagnostics.
     """
     W0, W, Omega, b0, b = model(xy)
     lambda_exp = jnp.exp(Omega[:, None] * time_indices[None, :] * model.t_scale)
@@ -103,7 +163,19 @@ def loss_fn(
 
 
 def _vis_chi2(vis_pred, target, sigma, mask):
-    """Reduced complex-visibility chi-squared (per real dof: divide by 2*sum(mask))."""
+    """Reduced complex-visibility chi-squared, per real degree of freedom.
+
+    Parameters
+    ----------
+    vis_pred, target, sigma, mask : jax.Array
+        ``(T, M)`` predicted and target visibilities, 1-sigma errors, and 0/1
+        mask. Masked entries contribute nothing.
+
+    Returns
+    -------
+    jax.Array
+        Scalar chi-squared divided by ``2 * sum(mask)`` (Re and Im each count).
+    """
     diff2 = jnp.abs(vis_pred - target) ** 2
     return jnp.sum(diff2 * mask / sigma**2) / (2.0 * jnp.sum(mask))
 
@@ -184,13 +256,15 @@ def polarized_loss_fn(
     p_le_i_weight : float
         Weight for the optional ``sum(relu(sqrt(Q^2+U^2+V^2) - I)^2)`` penalty
         (default 0.0 -> disabled).
-    flux_target : float or None
-        Known total flux [Jy]. When set, adds
-        ``flux_weight * mean_t(((sum_p I[p, t] - flux_target) / flux_target)^2)``
-        -- a lightcurve anchor. The array has no zero-spacing baseline, so total
-        flux is only weakly constrained by the data and can otherwise leak into
-        a large-scale haze (and, later, into station gain amplitudes). ``None``
-        disables (default).
+    flux_target : float, array_like or None
+        Known total flux [Jy], either a scalar or a per-frame curve spanning the
+        normalized time axis (sampled at this batch's times). When set, adds
+        ``flux_weight * mean_t(((sum_p I[p, t] - F_t) / F_t)^2)`` -- a lightcurve
+        anchor. The array has no zero-spacing baseline, so total flux is only
+        weakly constrained by the data and can otherwise leak into a large-scale
+        haze (and, later, into station gain amplitudes). Pass a curve whenever the
+        source is genuinely variable; a scalar would fight the real variability.
+        ``None`` disables (default).
     flux_weight : float
         Weight of the total-flux anchor.
     compact_weight : float
@@ -240,13 +314,18 @@ def polarized_loss_fn(
     vis_stokes = {
         s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64)) for s in model.stokes
     }
+    # Raw sums are accumulated alongside the weighted total so the sparsity priors
+    # (on at weight 1.0 by default) show up in the aux. Summation order of
+    # `sparse_total` is unchanged, so its value is bit-identical to before.
     sparse_total = 0.0
+    w_sparse_raw = 0.0
+    b_sparse_raw = 0.0
     for w0, w, b0, b in modes:
-        sparse_total = (
-            sparse_total
-            + w_sparse_weight * sparsity_loss(w0, w)
-            + b_sparse_weight * sparsity_loss(b0, b)
-        )
+        ws = sparsity_loss(w0, w)
+        bs = sparsity_loss(b0, b)
+        w_sparse_raw = w_sparse_raw + ws
+        b_sparse_raw = b_sparse_raw + bs
+        sparse_total = sparse_total + w_sparse_weight * ws + b_sparse_weight * bs
 
     if basis == "stokes":
         chi2 = {s: _vis_chi2(vis_stokes[s], targets[s], sigmas[s], masks[s]) for s in model.stokes}
@@ -289,9 +368,17 @@ def polarized_loss_fn(
 
     if flux_target is not None:
         # total-flux (lightcurve) anchor: images are Jy/pixel, so the per-frame
-        # pixel sum is the model's zero-spacing flux
+        # pixel sum is the model's zero-spacing flux. A scalar target pins every
+        # frame to the same value; a curve is sampled at this batch's times, which
+        # is what a genuinely variable source (GRMHD, flaring Sgr A*) needs.
+        ft = jnp.asarray(flux_target)
+        if ft.ndim == 0:
+            target_t = ft
+        else:
+            grid = jnp.linspace(0.0, 1.0, ft.size)
+            target_t = jnp.interp(time_indices, grid, ft)
         tot_flux = jnp.sum(images["I"], axis=0)  # (T,)
-        flux_penalty = jnp.mean(((tot_flux - flux_target) / flux_target) ** 2)
+        flux_penalty = jnp.mean(((tot_flux - target_t) / target_t) ** 2)
     else:
         flux_penalty = jnp.asarray(0.0)
 
@@ -402,5 +489,7 @@ def polarized_loss_fn(
         "compact_pol_penalty": compact_pol_penalty,
         "support_penalty": support_penalty,
         "pol_l1_penalty": pol_l1_penalty,
+        "w_sparsity": jnp.asarray(w_sparse_raw),
+        "b_sparsity": jnp.asarray(b_sparse_raw),
         "basis": basis,
     }

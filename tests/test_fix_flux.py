@@ -11,7 +11,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from neuraldmd.data.lightcurve import CO_LOCATED_SITES, measure_lightcurve
+from neuraldmd.data.lightcurve import (
+    CO_LOCATED_SITES,
+    canonical_station,
+    measure_lightcurve,
+)
 from neuraldmd.polarized import PolarizedNeuralDMD
 
 S = ("I", "Q", "U")
@@ -151,3 +155,43 @@ def test_measure_lightcurve_needs_intra_site_baselines():
 
     with pytest.raises(ValueError, match="no intra-site baselines"):
         measure_lightcurve(FakeOp())
+
+
+def test_two_letter_station_codes_are_recognized():
+    """Real EHT uvfits label stations 'AA', 'AP', ... not 'ALMA', 'APEX'.
+
+    Without the alias table an array that plainly has intra-site baselines looks
+    like it has none, and the flux scale silently stops being measurable on real
+    data -- which is exactly where it matters most.
+    """
+    assert canonical_station("AA") == "ALMA"
+    assert canonical_station("aa") == "ALMA"
+    assert canonical_station("JC") == "JCMT"
+    assert canonical_station("SR") == "SMAR"
+    assert canonical_station("ALMA") == "ALMA", "canonical names must pass through"
+    assert canonical_station("ZZ") == "ZZ", "unknown labels are left alone"
+
+
+def test_measure_lightcurve_works_with_two_letter_codes():
+    """A two-letter-coded array measures the same flux as its named equivalent."""
+    t, m = 3, 4
+    flux = np.array([2.0, 2.5, 3.0])
+    targets = np.zeros((t, m), complex)
+    masks = np.zeros((t, m))
+    bl = np.zeros((t, m, 2), int)
+    # baseline 0 joins stations 0 and 1; the rest are unusable
+    bl[:, 0, 0], bl[:, 0, 1] = 0, 1
+    bl[:, 1:, 0], bl[:, 1:, 1] = 0, 2
+    targets[:, 0] = flux
+    masks[:, 0] = 1.0
+
+    class Op:
+        stokes = ("I",)
+        stations = ("AA", "AP", "LM")  # Chajnantor pair, by code
+        targets = {"I": None}
+        masks = {"I": None}
+        bl_station_ids = bl
+
+    Op.targets["I"] = targets
+    Op.masks["I"] = masks
+    np.testing.assert_allclose(measure_lightcurve(Op()), flux, rtol=1e-6)

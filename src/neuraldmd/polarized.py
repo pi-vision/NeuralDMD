@@ -22,6 +22,7 @@ freedom in the coordinate chart where those constraints are a simple box on
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -73,6 +74,9 @@ class PolarizedNeuralDMD(eqx.Module):
     scaling_ml: float = eqx.field(static=True)
     fix_flux: tuple[float, ...] | None = eqx.field(static=True)
     pol_param: str = eqx.field(static=True)
+    couple: str = eqx.field(static=True)
+    n_shared: int = eqx.field(static=True)
+    share_trunk: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -86,6 +90,9 @@ class PolarizedNeuralDMD(eqx.Module):
         r_pol: int | None = None,
         pol_param: str = "fractional",
         pol_model_kwargs: dict | None = None,
+        couple: str = "none",
+        n_shared: int | None = None,
+        share_trunk: bool = False,
         **model_kwargs,
     ):
         """Build the I field and the fractional-pol fields from independent split keys.
@@ -163,8 +170,43 @@ class PolarizedNeuralDMD(eqx.Module):
                 f"'expm_full', got {pol_param!r}"
             )
         self.pol_param = str(pol_param)
+
+        if couple not in ("none", "pol", "all"):
+            raise ValueError(f"couple must be 'none', 'pol', or 'all', got {couple!r}")
+        if share_trunk and couple == "none":
+            raise ValueError("share_trunk needs couple='pol' or 'all' to name a trunk owner")
+        self.couple = str(couple)
+        n_shared = r if n_shared is None else int(n_shared)
+        if not 0 <= n_shared <= r:
+            raise ValueError(f"n_shared must be in [0, r={r}], got {n_shared}")
+        self.n_shared = 0 if couple == "none" else n_shared
+        self.share_trunk = bool(share_trunk)
+
         r_pol = r if r_pol is None else int(r_pol)
+        if couple != "none" and r_pol != r:
+            warnings.warn(
+                f"couple={couple!r} shares one spectrum, so r_pol={r_pol} is ignored and "
+                f"forced to r={r}. Zero out a field's b to drop a mode instead.",
+                stacklevel=2,
+            )
+            r_pol = r
         pol_kwargs = {**model_kwargs, **(pol_model_kwargs or {})}
+        if share_trunk and couple == "all":
+            # pol heads consume the intensity trunk's features, so their own trunk
+            # geometry must match it -- and is then unused.
+            clashing = [
+                k
+                for k in ("hidden_size", "num_layers", "num_frequencies")
+                if k in (pol_model_kwargs or {})
+            ]
+            if clashing:
+                warnings.warn(
+                    f"share_trunk with couple='all' ignores pol overrides {clashing}: "
+                    "the polarization heads read the Stokes-I trunk.",
+                    stacklevel=2,
+                )
+                pol_kwargs = {k: v for k, v in pol_kwargs.items() if k not in clashing}
+                pol_kwargs.update({k: model_kwargs[k] for k in clashing if k in model_kwargs})
         want_v = "V" in self.stokes
         keys = jax.random.split(key, 5 if want_v else 4)
         self.intensity = NeuralDMD(r=r, key=keys[0], **model_kwargs)
@@ -176,6 +218,138 @@ class PolarizedNeuralDMD(eqx.Module):
         # sky model can be built and pretrained without knowing the array. None here
         # means calibration is not being solved -- the M2 default.
         self.gains = None
+
+    #: Sub-field attribute names, in construction order.
+    FIELD_NAMES = ("intensity", "frac", "cos2xi", "sin2xi", "circ")
+
+    def _bank_owner(self):
+        """The sub-field whose spectrum (and trunk) the coupled fields borrow.
+
+        Returns
+        -------
+        NeuralDMD or None
+            ``intensity`` for ``couple='all'``, ``frac`` for ``couple='pol'``,
+            and ``None`` when nothing is coupled.
+        """
+        if self.couple == "all":
+            return self.intensity
+        if self.couple == "pol":
+            return self.frac
+        return None
+
+    def _coupled_names(self):
+        """Names of the sub-fields that read from the shared bank.
+
+        Returns
+        -------
+        tuple of str
+            Empty when ``couple='none'``.
+        """
+        if self.couple == "all":
+            return self.FIELD_NAMES
+        if self.couple == "pol":
+            return ("frac", "cos2xi", "sin2xi", "circ")
+        return ()
+
+    def _shared_state(self, xy):
+        """Per-field keyword arguments implementing the configured coupling.
+
+        A coupled field's spectrum is ``concat(shared[:n_shared], own[n_shared:])``,
+        so ``n_shared=r`` shares the whole bank and the private modes are what let
+        polarization carry a periodicity that Stokes I does not have. Trunk sharing
+        is independent of the spectrum: ``share_trunk`` with ``n_shared=0`` is one
+        spatial network feeding every Stokes head while each field keeps its own
+        fully independent spectrum.
+
+        Parameters
+        ----------
+        xy : jax.Array
+            ``(P, 2)`` pixel coordinates, needed only for the shared trunk.
+
+        Returns
+        -------
+        dict of str -> dict
+            Keyword arguments for :func:`~neuraldmd.model.physical_intensities`,
+            keyed by sub-field name. Empty dicts when nothing is coupled.
+        """
+        kw = {name: {} for name in self.FIELD_NAMES}
+        owner = self._bank_owner()
+        if owner is None:
+            return kw
+
+        # Trunk sharing and spectrum sharing are independent axes. share_trunk with
+        # n_shared=0 is "one spatial MLP, but every Stokes keeps its own spectrum";
+        # n_shared>0 without share_trunk shares the spectrum but not the trunk.
+        share_omega = self.n_shared > 0
+        if not share_omega and not self.share_trunk:
+            return kw
+
+        feats = jax.vmap(owner.spatial_features)(xy) if self.share_trunk else None
+        shared_omega = None
+        if share_omega:
+            alphas, thetas = owner.temporal_omega()
+            shared_omega = alphas + 1j * thetas
+
+        for name in self._coupled_names():
+            field = getattr(self, name)
+            if field is None:
+                continue
+            entry: dict = {}
+            if self.share_trunk:
+                entry["spatial_features"] = feats
+            if share_omega:
+                if self.n_shared >= field.r:
+                    entry["omega"] = shared_omega
+                else:
+                    own_a, own_t = field.temporal_omega()
+                    own = own_a + 1j * own_t
+                    entry["omega"] = jnp.concatenate(
+                        [shared_omega[: self.n_shared], own[self.n_shared :]]
+                    )
+            kw[name] = entry
+        return kw
+
+    def aligned_modes(self, xy, times):
+        """Per-field modes indexed by the shared mode number.
+
+        Only meaningful when a bank is shared: mode ``k`` then denotes the same
+        frequency in every coupled field, which is what makes per-mode
+        polarimetry (per-mode EVPA structure, I-to-pol phase lags) well defined.
+
+        Parameters
+        ----------
+        xy : jax.Array
+            ``(P, 2)`` pixel coordinates.
+        times : jax.Array
+            ``(T,)`` normalized frame times.
+
+        Returns
+        -------
+        dict
+            ``{"Omega": (r,) complex shared spectrum, "n_shared": int,
+            "fields": {name: (W0, W, b0, b)}}`` over the coupled sub-fields.
+
+        Raises
+        ------
+        ValueError
+            If no bank is shared, so mode indices are not comparable.
+        """
+        owner = self._bank_owner()
+        if owner is None or self.n_shared <= 0:
+            raise ValueError(
+                "aligned_modes needs a shared bank; build with couple='pol' or "
+                "'all' and n_shared > 0"
+            )
+        kw = self._shared_state(xy)
+        alphas, thetas = owner.temporal_omega()
+        fields = {}
+        for name in self._coupled_names():
+            field = getattr(self, name)
+            if field is None:
+                continue
+            _, modes = physical_intensities(field, xy, times, 1.0, 0.0, **kw[name])
+            fields[name] = modes
+        return {"Omega": alphas + 1j * thetas, "n_shared": self.n_shared, "fields": fields}
 
     def stokes_fields(self, xy, times, frame_max: dict, frame_min: dict):
         """Physical per-Stokes image cubes, with the total flux fixed if configured.
@@ -260,6 +434,7 @@ class PolarizedNeuralDMD(eqx.Module):
         modes : list of tuple
             ``(W0, W, b0, b)`` per sub-network, for the sparsity penalty.
         """
+        kw = self._shared_state(xy)
         if self.pol_param == "expm_full":
             # FULL matrix-exponential brightness matrix (Arras et al. 2025; the form
             # resolve uses). X = exp([[s+v, q+iu],[q-iu, s-v]]) with s the LOG
@@ -274,13 +449,17 @@ class PolarizedNeuralDMD(eqx.Module):
             # frame_max["I"] so the brightness lands in physical units, and s is
             # clipped to avoid exp overflow (the flux anchor keeps it near 0). NB
             # incompatible with the physical-I disk pretrain -- run with --no-pretrain.
-            s_raw, s_modes = physical_intensities(self.intensity, xy, times, 1.0, 0.0)
-            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
-            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
-            _, sp_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            s_raw, s_modes = physical_intensities(
+                self.intensity, xy, times, 1.0, 0.0, **kw["intensity"]
+            )
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0, **kw["frac"])
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0, **kw["cos2xi"])
+            _, sp_modes = physical_intensities(
+                self.sin2xi, xy, times, 1.0, 0.0, **kw["sin2xi"]
+            )  # spare
             want_v = self.circ is not None
             if want_v:
-                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0, **kw["circ"])
                 p_sq = q_raw**2 + u_raw**2 + v_raw**2
             else:
                 p_sq = q_raw**2 + u_raw**2
@@ -301,7 +480,7 @@ class PolarizedNeuralDMD(eqx.Module):
             return images, modes
 
         i_img, i_modes = physical_intensities(
-            self.intensity, xy, times, frame_max["I"], frame_min["I"]
+            self.intensity, xy, times, frame_max["I"], frame_min["I"], **kw["intensity"]
         )
 
         if self.pol_param == "direct":
@@ -310,11 +489,15 @@ class PolarizedNeuralDMD(eqx.Module):
             # constraint on the EVPA direction, so an m=2 (spiral) pattern fits as
             # readily as the ring itself. P<=I and off-source pol suppression come
             # from the loss's soft ``p_weight`` penalty, not by construction.
-            q_img, q_modes = physical_intensities(self.frac, xy, times, frame_max["I"], 0.0)
-            u_img, u_modes = physical_intensities(self.cos2xi, xy, times, frame_max["I"], 0.0)
+            q_img, q_modes = physical_intensities(
+                self.frac, xy, times, frame_max["I"], 0.0, **kw["frac"]
+            )
+            u_img, u_modes = physical_intensities(
+                self.cos2xi, xy, times, frame_max["I"], 0.0, **kw["cos2xi"]
+            )
             # sin2xi kept live (spare) so the pol freeze/warmup update partition and
             # the modes/sparsity list stay identical across both parameterizations.
-            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)
+            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0, **kw["sin2xi"])
             images = {"I": i_img}
             modes = [i_modes, q_modes, u_modes, s_modes]
             if "Q" in self.stokes:
@@ -322,7 +505,9 @@ class PolarizedNeuralDMD(eqx.Module):
             if "U" in self.stokes:
                 images["U"] = u_img
             if self.circ is not None:
-                v_img, v_modes = physical_intensities(self.circ, xy, times, frame_max["I"], 0.0)
+                v_img, v_modes = physical_intensities(
+                    self.circ, xy, times, frame_max["I"], 0.0, **kw["circ"]
+                )
                 images["V"] = v_img
                 modes.append(v_modes)
             return images, modes
@@ -335,9 +520,11 @@ class PolarizedNeuralDMD(eqx.Module):
             # q,u free of the unit-EVPA winding obstruction, so an m>=2 (spiral)
             # EVPA is representable. P = I*sqrt(q^2+u^2); tanh caps |q|,|u|<=1 so
             # P <= sqrt(2)*I, and the residual P<=I is the soft p_le_i penalty.
-            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
-            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
-            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0, **kw["frac"])
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0, **kw["cos2xi"])
+            _, s_modes = physical_intensities(
+                self.sin2xi, xy, times, 1.0, 0.0, **kw["sin2xi"]
+            )  # spare
             q = jnp.tanh(q_raw)
             u = jnp.tanh(u_raw)
             images = {"I": i_img}
@@ -347,7 +534,7 @@ class PolarizedNeuralDMD(eqx.Module):
             if "U" in self.stokes:
                 images["U"] = i_img * u
             if self.circ is not None:
-                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0, **kw["circ"])
                 images["V"] = i_img * jnp.tanh(v_raw)
                 modes.append(v_modes)
             return images, modes
@@ -361,12 +548,14 @@ class PolarizedNeuralDMD(eqx.Module):
             # support (Q,U,V prop I -> 0 where I=0), and no winding (q,u,v are free
             # fields; tanh(p)/p is smooth through p=0). Cleaner P<=I than iscaled
             # (exact vs sqrt(2) bound) and V-capable; no p_le_i penalty required.
-            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
-            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
-            _, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)  # spare
+            q_raw, q_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0, **kw["frac"])
+            u_raw, u_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0, **kw["cos2xi"])
+            _, s_modes = physical_intensities(
+                self.sin2xi, xy, times, 1.0, 0.0, **kw["sin2xi"]
+            )  # spare
             want_v = self.circ is not None
             if want_v:
-                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+                v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0, **kw["circ"])
                 p_sq = q_raw**2 + u_raw**2 + v_raw**2
             else:
                 p_sq = q_raw**2 + u_raw**2
@@ -383,9 +572,9 @@ class PolarizedNeuralDMD(eqx.Module):
                 modes.append(v_modes)
             return images, modes
 
-        ml_raw, ml_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0)
-        c_raw, c_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0)
-        s_raw, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0)
+        ml_raw, ml_modes = physical_intensities(self.frac, xy, times, 1.0, 0.0, **kw["frac"])
+        c_raw, c_modes = physical_intensities(self.cos2xi, xy, times, 1.0, 0.0, **kw["cos2xi"])
+        s_raw, s_modes = physical_intensities(self.sin2xi, xy, times, 1.0, 0.0, **kw["sin2xi"])
         # m_l in [0, scaling_ml]; outshift -> m_l ~ 0 at init (unpolarized)
         m_l = jax.nn.sigmoid(ml_raw - self.outshift) * self.scaling_ml
         # EVPA direction as a UNIT vector (cos2xi^2 + sin2xi^2 = 1), so that
@@ -401,7 +590,7 @@ class PolarizedNeuralDMD(eqx.Module):
         if "U" in self.stokes:
             images["U"] = m_l * i_img * sin2xi
         if self.circ is not None:
-            v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0)
+            v_raw, v_modes = physical_intensities(self.circ, xy, times, 1.0, 0.0, **kw["circ"])
             m_c = (jax.nn.sigmoid(v_raw - self.outshift) - 0.5) * 2.0
             images["V"] = m_c * i_img
             modes.append(v_modes)

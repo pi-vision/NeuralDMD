@@ -596,6 +596,9 @@ def to_ehtim_movie(frames, times, fov_uas=200.0, source="SgrA", qframes=None, uf
         im.time = float(t)
         if qframes is not None and uframes is not None:
             im.add_qu(qframes[i], uframes[i])
+            # ehtim's polarized chi-squared requires all four Stokes; a movie
+            # without V cannot be scored by polchisq at all
+            im.add_v(np.zeros_like(frames[i]))
         imlist.append(im)
 
     return eh.movie.merge_im_list(imlist)

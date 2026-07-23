@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 
@@ -38,6 +39,16 @@ def parse_args():
         default=2,
         help="Stokes-I positional-encoding frequencies; the finest representable "
         "feature is ~fov/2^freq, so a thin ring / sharp background edge needs >2",
+    )
+    ap.add_argument(
+        "--dyn-cap",
+        type=float,
+        default=None,
+        help="hard cap on dynamic-to-static amplitude ratio sqrt(sum|b_j|^2)/b_0, "
+        "imposed by rescaling inside the model (no penalty weight). Bounding the "
+        "spectrum with --theta-max limits only WHERE variability sits; the fit "
+        "answers that by inflating amplitudes. This bounds how MUCH there is, and "
+        "its value comes from a GRMHD library rather than tuning",
     )
     ap.add_argument(
         "--theta-max",
@@ -109,6 +120,13 @@ def parse_args():
     # mring+hsCW) instead of self-generating one; the ground truth is rebuilt on
     # the observation's own clock for evaluation
     ap.add_argument("--uvfits", default=None, help="external uvfits to fit (skips generation)")
+    ap.add_argument(
+        "--truth-hdf5",
+        default=None,
+        help="validation-ladder ground-truth movie to score against (uvfits mode). "
+        "Without it, uvfits mode rebuilds a synthetic parametric truth, which is "
+        "meaningless for a ladder dataset",
+    )
     ap.add_argument("--syserr", type=float, default=0.0, help="fractional syserr added to sigma")
     ap.add_argument(
         "--truth-frames", type=int, default=200, help="truth-movie frames (uvfits mode)"
@@ -153,6 +171,31 @@ def parse_args():
         type=int,
         default=None,
         help="DMD modes for the pol fields (default = --r; use < r to starve capacity)",
+    )
+    # ── shared temporal bank / spatial trunk across Stokes ──
+    ap.add_argument(
+        "--couple",
+        default="none",
+        choices=["none", "pol", "all"],
+        help="share one temporal spectrum: 'pol' ties the polarization fields to "
+        "each other (Q,U are one spin-2 field), 'all' adds Stokes I so mode k "
+        "means the same frequency in every Stokes and per-mode polarimetry is "
+        "defined. Default 'none' = every field fits its own spectrum",
+    )
+    ap.add_argument(
+        "--n-shared-modes",
+        type=int,
+        default=None,
+        help="how many of the r modes come from the shared bank (default: all). "
+        "Leaving some private lets polarization carry a periodicity Stokes I "
+        "does not have; the shared-vs-private power split in mode_table.json "
+        "then measures whether it does",
+    )
+    ap.add_argument(
+        "--share-trunk",
+        action="store_true",
+        help="also share the spatial trunk, so pol fields are thin heads on the "
+        "bank owner's features (encodes: pol structure lives where I structure is)",
     )
     ap.add_argument(
         "--pol-frequencies",
@@ -202,6 +245,15 @@ def parse_args():
         "--flux", type=float, default=None, help="known total flux [Jy] (anchor off=None)"
     )
     ap.add_argument("--flux-weight", type=float, default=1.0, help="total-flux anchor weight")
+    ap.add_argument(
+        "--flux-curve",
+        choices=("measured",),
+        default=None,
+        help="anchor the total flux SOFTLY to the per-frame light curve measured "
+        "from intra-site baselines, instead of the scalar --flux. Use whenever the "
+        "source varies (GRMHD, a flaring Sgr A*): one number would fight the real "
+        "variability, while the measured curve is a data product, not a tuned knob",
+    )
     ap.add_argument(
         "--fix-flux",
         choices=("measured", "given"),
@@ -310,19 +362,32 @@ def main():
             syserr=args.syserr,
         )
         op.to_obs_dir(data_dir)
-        # rebuild the canonical truth on the observation's own clock: uniform
-        # frames spanning first->last scan; training uses the actual scan times
         t0, t1 = op.time_anchors_hr
-        print(f"Rebuilding truth movie on {t0:.3f}..{t1:.3f} UT ...", flush=True)
-        movie = make_mring_hs_pol_movie(
-            npix=args.npix,
-            fov_uas=args.fov_uas,
-            num_frames=args.truth_frames,
-            tstart_hr=t0,
-            tstop_hr=t1,
-            linpol_frac=args.frac_pol,
-        )
-        save_truth_npz(movie, data_dir, args.npix, args.fov_uas)
+        if args.truth_hdf5:
+            from neuraldmd.data.ladder import write_truth_npz
+
+            print(f"Ladder truth {args.truth_hdf5} on {t0:.3f}..{t1:.3f} UT ...", flush=True)
+            info = write_truth_npz(
+                args.truth_hdf5, data_dir, args.npix, op.times, anchors_hr=(t0, t1)
+            )
+            print(
+                f"  fov {info['fov_uas']:.1f} uas, flux {info['flux_mean']:.3f} "
+                f"+- {info['flux_std']:.3f} Jy",
+                flush=True,
+            )
+        else:
+            # rebuild the canonical truth on the observation's own clock: uniform
+            # frames spanning first->last scan; training uses the actual scan times
+            print(f"Rebuilding truth movie on {t0:.3f}..{t1:.3f} UT ...", flush=True)
+            movie = make_mring_hs_pol_movie(
+                npix=args.npix,
+                fov_uas=args.fov_uas,
+                num_frames=args.truth_frames,
+                tstart_hr=t0,
+                tstop_hr=t1,
+                linpol_frac=args.frac_pol,
+            )
+            save_truth_npz(movie, data_dir, args.npix, args.fov_uas)
     else:
         print("Generating polarized dataset ...", flush=True)
         op = generate_polarized_dataset(
@@ -380,6 +445,21 @@ def main():
         )
         print(f"Total flux FIXED, {src}", flush=True)
 
+    # Soft anchor on a MEASURED light curve. A real source varies -- the ladder's
+    # GRMHD truth swings 2.08-3.22 Jy over one track -- so anchoring every frame to
+    # one number would fight the variability it is meant to constrain.
+    flux_target = args.flux
+    if args.flux_curve == "measured":
+        from neuraldmd.data.lightcurve import measure_lightcurve
+
+        curve = measure_lightcurve(op)
+        flux_target = curve
+        print(
+            f"Flux anchor: measured curve, {curve.mean():.4f} Jy mean, "
+            f"range [{curve.min():.4f}, {curve.max():.4f}]",
+            flush=True,
+        )
+
     model = PolarizedNeuralDMD(
         stokes,
         r=args.r,
@@ -394,6 +474,10 @@ def main():
         num_layers=args.num_layers,
         num_frequencies=args.frequencies,
         theta_max=args.theta_max,
+        dyn_cap=args.dyn_cap,
+        couple=args.couple,
+        n_shared=args.n_shared_modes,
+        share_trunk=args.share_trunk,
     )
 
     if args.fit_gains:
@@ -479,7 +563,7 @@ def main():
         optimizer_name=args.optimizer,
         lr_decay_rate=args.lr_decay_rate,
         lr_decay_steps=args.lr_decay_steps,
-        flux_target=args.flux,
+        flux_target=flux_target,
         flux_weight=args.flux_weight,
         compact_weight=args.compact_weight,
         compact_pol_weight=args.compact_pol_weight,
@@ -643,8 +727,12 @@ def main():
 
         xy_grid = ev.pixel_grid_coords(args.npix, args.npix)  # jax accepts numpy
         pol_field_name = "Q" if args.pol_param == "direct" else "mfrac"
-        for name, sub in (("I", model.intensity), (pol_field_name, model.frac)):
-            w0, w, om, b0, b = sub(xy_grid)
+        # Under coupling a field borrows its spectrum, so its own temporal net is
+        # (partly) untrained -- read the effective Omega the model actually uses.
+        shared_kw = model._shared_state(jnp.asarray(xy_grid))
+        for name, attr in (("I", "intensity"), (pol_field_name, "frac")):
+            sub = getattr(model, attr)
+            w0, w, om, b0, b = sub(xy_grid, **shared_kw[attr])
             w_s, om_s, _ = ev.sort_modes_by_lambda(w, om, b)
             ev.plot_modes(
                 np.asarray(w_s),
@@ -667,11 +755,40 @@ def main():
     except Exception as exc:
         print(f"[warn] mode plots failed: {exc}", flush=True)
 
+    # per-mode table on the shared index: recovered frequencies, per-Stokes
+    # amplitudes and phase lags, and how much power sits on shared vs private modes
+    if args.couple != "none":
+        try:
+            window_hr = None
+            anchors = getattr(op, "time_anchors_hr", None)
+            if anchors is not None:
+                window_hr = float(anchors[1]) - float(anchors[0])
+            table = ev.mode_table(model, args.npix, truth["times"], window_hr=window_hr)
+            (out / "mode_table.json").write_text(json.dumps(table, indent=2))
+            for name, entry in table["fields"].items():
+                print(
+                    f"[modes] {name}: shared power {entry['shared_power']:.3f}, "
+                    f"private {entry['private_power']:.3f}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[warn] mode table failed: {exc}", flush=True)
+
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:
+        # ehtim indexes a movie by UT hour, so the exported file must carry the
+        # observation's clock, not our normalized [0, 1] axis. Writing normalized
+        # times produces a file that ehtim refuses to score against the very data
+        # it was fitted to.
+        export_times = np.asarray(truth["times"], dtype=np.float64)
+        anchors = getattr(op, "time_anchors_hr", None)
+        if anchors is not None:
+            t0, t1 = float(anchors[0]), float(anchors[1])
+            export_times = t0 + export_times * (t1 - t0)
+            print(f"Recon movie clock: {t0:.3f}..{t1:.3f} UT", flush=True)
         recon_movie = to_ehtim_movie(
             recon["I"].astype(np.float64),
-            truth["times"],
+            export_times,
             fov_uas=args.fov_uas,
             qframes=recon["Q"].astype(np.float64),
             uframes=recon["U"].astype(np.float64),
