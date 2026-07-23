@@ -31,8 +31,9 @@ We extend \neuralDMD to full polarization. A single spatial network and a single
 bank of temporal frequencies serve every Stokes parameter; only the readouts --- a
 set of spatial modes and complex amplitudes per field --- are separate. The sharing
 is the physical statement that structure and rates belong to the emitting plasma
-rather than to the Stokes parameter one happens to measure. Polarization is built through a matrix-exponential chart, enforcing
-$P\le I$ and support by construction rather than by penalty. Station gains are
+rather than to the Stokes parameter one happens to measure. Polarization is parameterized as a fraction of intensity, as in \kine, with the
+intensity supplying support; leaving the EVPA direction free avoids a winding
+obstruction that a unit-normalized direction would introduce. Station gains are
 solved jointly and the total flux is supplied from the data.
 \end{abstract}
 
@@ -143,40 +144,40 @@ The sky is a Stokes vector obeying, at every pixel,
 with polarization vanishing wherever there is no emission. Free $(Q,U,V)$ fields
 respect neither, and can reach $\chi^2\approx1$ on unphysical images.
 
-\paragraph{Chart.}
+\paragraph{Chart (fractional polarization).}
 \label{sec:chart}
-The polarization is built from the three fields $q,u,v$ of
-Eqs.~\eqref{eq:fieldq}--\eqref{eq:fieldv} by the matrix-exponential fractional
-form. With
+We parameterize the polarization as a fraction of the total intensity, following
+\kine. The three raw fields $q,u,v$ of
+Eqs.~\eqref{eq:fieldq}--\eqref{eq:fieldv} pass through bounded activations to give a
+linear-polarization fraction $m_\ell$ and an angle direction
+$(\sin2\chi,\cos2\chi)$,
 \begin{equation}
-  p=\sqrt{q^2+u^2+v^2},
-  \label{eq:pmag}
+  m_\ell = m_\ell^{\max}\,\sigma(q-\delta), \qquad
+  \sin2\chi = 2\sigma(u)-1, \qquad
+  \cos2\chi = 2\sigma(v)-1,
+  \label{eq:kine}
 \end{equation}
+from which the linear Stokes parameters are
 \begin{equation}
-  \boxed{\;(Q,U,V) \;=\; I\,\frac{\tanh p}{p}\,\bigl(q,\,u,\,v\bigr).\;}
+  \boxed{\;Q = -\,I\,m_\ell\,\sin2\chi, \qquad U = I\,m_\ell\,\cos2\chi\;}
   \label{eq:expm}
 \end{equation}
-The polarization fraction is $m=\tanh p\le1$, so Eq.~\eqref{eq:pli} holds
-\emph{exactly} with no penalty weight; support is inherited from the factor $I$, so
-polarization cannot appear off-source; $\tanh(p)/p$ is smooth through $p=0$; and
-Stokes $V$ is native. The polarization angle follows as
-$\chi=\tfrac12\operatorname{atan2}(U,Q)$.
+(circular polarization, when modelled, adds a fourth field $m_c=2\sigma(\cdot)-1$
+and $V=I\,m_c$). The bias $\delta$ starts the source unpolarized; $m_\ell^{\max}$
+caps the fraction (we use $0.75$). The polarization angle is
+$\chi=\tfrac12\operatorname{atan2}(\sin2\chi,\cos2\chi)$, and support is inherited
+from the factor $I$, so polarization cannot appear off-source.
 
-Two remarks place this chart among the alternatives. First, one must \emph{not}
-build $(Q,U)$ as a fraction times a \emph{unit} direction,
-$Q,U=m_\ell I(\cos2\chi,\sin2\chi)$ with $(\cos2\chi,\sin2\chi)$ constrained to the
-circle: that direction field must then wind $m$ times around the source for an
-azimuthal pattern of order $m$, and winding number cannot change continuously
-during optimization, so the fit either begins in the correct topological sector or
-never reaches it. We tried it and it is bimodal in practice. The remedy is simply
-to leave the two direction components \emph{free} rather than normalized --- which
-is exactly what \kine does (its $\sin2\chi,\cos2\chi$ are independent
-bounded outputs, not a unit vector), and why it does not suffer the obstruction.
-Equation~\eqref{eq:expm} is of that free family: $q,u,v$ are unconstrained.
-Second, within the free family it is the tidiest choice --- $\tanh$ saturates the
-\emph{magnitude} so $P\le I$ holds exactly (a free direction alone gives only
-$P\le\sqrt2\,I$, needing a soft penalty to finish), and $V$ is included at no extra
-cost.
+Crucially the direction $(\sin2\chi,\cos2\chi)$ is left \emph{free} in $[-1,1]^2$,
+not normalized to the unit circle. Were it normalized, the direction would have to
+wind $m$ times around the source for an azimuthal pattern of order $m$, and winding
+number cannot change continuously during optimization, so the fit would either
+begin in the correct topological sector or never reach it --- we tried the
+normalized form and it is bimodal across seeds. The free form (which is what \kine
+uses) avoids the obstruction. Its linear polarized fraction is
+$m_\ell\sqrt{\sin^2 2\chi+\cos^2 2\chi}\le\sqrt2\,m_\ell$, so
+$P\le\sqrt2\,m_\ell^{\max} I$; the strict bound $P\le I$ can be added as a soft
+penalty when required.
 
 \paragraph{One spectrum, many observables.}
 \label{sec:sharing}
@@ -316,8 +317,8 @@ polarization fraction untouched.
   \node (mq) at (4.6, 0.28) {$w^{q}_j$};
   \node (mu) at (4.6,-0.28) {$w^{u}_j$};
   \node (mv) at (4.6,-0.85) {$w^{v}_j$};
-  \node[op, minimum width=18mm] (sum) at (7.6,0) {modal sum\\Eq.~\eqref{eq:fieldI}};
-  \node[res, minimum width=18mm] (cubes) at (11.2,0) {$I,Q,U,V$\\{\scriptsize movie}};
+  \node[op, minimum width=30mm] (sum) at (7.7,0) {{\scriptsize modal sum}\\[1pt]$\scriptstyle w_0 b_0+2\Re\sum_j w_j b_j\,e^{\Omega_j \tsc t}$};
+  \node[res, minimum width=17mm] (cubes) at (11.6,0) {$I,Q,U,V$\\{\scriptsize movie}};
   \draw[->] (in) -- (W);
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (W) -- (\m); }
   \foreach \m in {mI,mq,mu,mv} { \draw[->] (\m) -- (sum); }
@@ -330,9 +331,9 @@ polarization fraction untouched.
   \draw[->] (spec) -- (sum);
 
   % ---- row 3 (y=-4.4): instrument, right to left ----
-  \node[op]  (ft)   at (11.2,-4.4) {$\mathcal{F}$, sample};
-  \node[op]  (pr)   at (7.6, -4.4) {products\\Eq.~\eqref{eq:products}};
-  \node[op]  (gn)   at (4.4, -4.4) {gains\\Eq.~\eqref{eq:rime}};
+  \node[op]  (ft)   at (11.6,-4.4) {$\mathcal{F}$, sample};
+  \node[op]  (pr)   at (7.7, -4.4) {{\scriptsize products}\\[1pt]$\scriptstyle RR{=}I{+}V,\ RL{=}Q{+}iU$\\[-1pt]$\scriptstyle LL{=}I{-}V,\ LR{=}Q{-}iU$};
+  \node[op]  (gn)   at (4.1, -4.4) {{\scriptsize gains}\\[1pt]$\scriptstyle \hat V\leftarrow g_{p}\,\hat V\,\overline{g_{q}}$};
   \node[res] (chi)  at (1.4, -4.4) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
   \draw[->] (cubes) -- (ft);
   \draw[->] (ft) -- (pr);
@@ -346,10 +347,10 @@ polarization fraction untouched.
 
 \section{Validation}
 
-The numbers below were obtained with a per-field spatial network rather than the
-single shared network of Eq.~\eqref{eq:net}; a per-Stokes network was used
-instead, with the shared spectrum in use throughout. Evaluation of the
-single-network variant is in progress.
+The numbers below were obtained with the free-direction fractional chart above
+(a per-field spatial network, shared spectrum). \kine's exact form and our
+functionally equivalent variants (e.g.\ $Q=I\tanh q$) give the same figures to
+within the seed spread.
 
 On synthetic polarized truths observed with EHT coverage the model recovers the
 polarization structure with NRMSE$_Q\approx0.11$ and a polarization-angle error
