@@ -290,6 +290,23 @@ def polarized_train_step(
     return model, opt_state, loss, aux
 
 
+#: Scalar penalty terms of :func:`~neuraldmd.losses.polarized_loss_fn`'s aux dict,
+#: logged per epoch to make the prior-vs-data balance of the objective measurable.
+#: ``chi2_vis`` (a dict) and ``basis`` (a static string) are not scannable scalars.
+PENALTY_KEYS: tuple[str, ...] = (
+    "neg_I",
+    "p_penalty",
+    "flux_penalty",
+    "compact_penalty",
+    "dyn_compact_penalty",
+    "compact_pol_penalty",
+    "support_penalty",
+    "pol_l1_penalty",
+    "w_sparsity",
+    "b_sparsity",
+)
+
+
 @eqx.filter_jit
 def polarized_train_epoch(
     model,
@@ -319,17 +336,53 @@ def polarized_train_epoch(
 ):
     """Scan :func:`polarized_train_step` over one epoch's batches.
 
-    ``epoch_data`` is a
-    ``(pixel_coords, As, targets, sigmas, masks, times)`` tuple from
-    :meth:`neuraldmd.data.loader.PolarizedDMDDataLoader.get_epoch_data`, with the
-    per-key dicts batched along a leading batch axis. Coordinates get small jitter
-    each step (as in :func:`train_epoch_jit`).
+    Coordinates get small jitter each step, as in :func:`train_epoch_jit`.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        Model at the start of the epoch.
+    opt_state : optax.OptState
+        Optimizer state.
+    epoch_data : tuple
+        ``(pixel_coords, As, targets, sigmas, masks, times, bl_station_ids,
+        frame_indices)`` from
+        :meth:`neuraldmd.data.loader.PolarizedDMDDataLoader.get_epoch_data`, with
+        the per-key dicts batched along a leading batch axis.
+    optimizer : optax.GradientTransformation
+        Optimizer to step with.
+    key : jax.Array
+        PRNG key for the coordinate jitter.
+    frame_max, frame_min : dict
+        Per-Stokes output scaling.
+    freeze_intensity : bool
+        Zero the Stokes-I update (fit polarization on a fixed I).
+    pol_scale : float or jax.Array
+        Scale applied to polarization-field updates (soft warmup/freeze).
+    basis : {"stokes", "circular"}
+        Fidelity basis of the chi-squared.
+    products : tuple of str
+        Correlation products used when ``basis="circular"``.
+    neg_weight, w_sparse_weight, b_sparse_weight : float
+        Weights for the I-negativity and per-net sparsity penalties.
+    p_le_i_weight, compact_weight, compact_pol_weight : float
+        Weights for the ``P<=I``, compactness, and polarized-compactness priors.
+    pol_support_weight, pol_l1_weight, dyn_compact_weight, flux_weight : float
+        Weights for the polarization support, polarized-L1, dynamic-compactness,
+        and total-flux priors. All are passed to
+        :func:`~neuraldmd.losses.polarized_loss_fn`.
+    flux_target : float or None
+        Total flux for the lightcurve anchor; ``None`` disables it.
+    pol_support_tau : float
+        Gate scale of the polarization support prior.
 
     Returns
     -------
-    model, opt_state, mean_loss, mean_chi2, mean_grad_norm
+    model, opt_state, mean_loss, mean_chi2, mean_grad_norm, mean_penalties
         ``mean_chi2`` is a dict keyed like the data (Stokes or product);
-        ``mean_grad_norm`` is the mean global gradient norm over the epoch.
+        ``mean_grad_norm`` is the mean global gradient norm over the epoch;
+        ``mean_penalties`` is a dict over :data:`PENALTY_KEYS` of epoch-mean raw
+        penalty values.
     """
     pixel_coords, as_b, tgt_b, sig_b, msk_b, times_b, bl_b, fidx_b = epoch_data
     keys = tuple(tgt_b.keys())
@@ -369,14 +422,20 @@ def polarized_train_epoch(
             pol_l1_weight=pol_l1_weight,
             dyn_compact_weight=dyn_compact_weight,
         )
-        return (model, opt_state, key), (loss, aux["chi2_vis"], aux["grad_norm"])
+        return (model, opt_state, key), (
+            loss,
+            aux["chi2_vis"],
+            aux["grad_norm"],
+            {k: aux[k] for k in PENALTY_KEYS},
+        )
 
     n_batches = as_b.shape[0]
-    (model, opt_state, _), (loss_log, chi2_log, gnorm_log) = jax.lax.scan(
+    (model, opt_state, _), (loss_log, chi2_log, gnorm_log, pen_log) = jax.lax.scan(
         scan_fn, (model, opt_state, key), jnp.arange(n_batches)
     )
     mean_chi2 = {k: jnp.mean(v) for k, v in chi2_log.items()}
-    return model, opt_state, jnp.mean(loss_log), mean_chi2, jnp.mean(gnorm_log)
+    mean_pen = {k: jnp.mean(v) for k, v in pen_log.items()}
+    return model, opt_state, jnp.mean(loss_log), mean_chi2, jnp.mean(gnorm_log), mean_pen
 
 
 @eqx.filter_jit
@@ -510,12 +569,66 @@ def train_polarized_model(
     Stokes I from that epoch onward (fit polarization on a fixed I, as in a
     staged reconstruction).
 
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        Model to train.
+    loader : PolarizedDMDDataLoader
+        Supplies batched epochs and the full-dataset evaluation arrays.
+    num_epochs : int
+        Number of epochs to run.
+    key : jax.Array
+        PRNG key; folded per epoch when ``fold_epoch_key``.
+    models_dir : str
+        Directory for the ``polarized_model.eqx`` checkpoint.
+    frame_max, frame_min : dict
+        Per-Stokes output scaling.
+    basis : {"stokes", "circular"}
+        Fidelity basis of the chi-squared.
+    products : tuple of str
+        Correlation products fitted when ``basis="circular"``; may be a subset.
+    freeze_intensity : bool
+        Hold Stokes I fixed for the whole call.
+    freeze_pol : bool
+        Hold every polarization field fixed for the whole call.
+    pol_warmup_epochs : int
+        Ramp polarization updates linearly from 0 to full over this many epochs.
+    freeze_i_after : int or None
+        Hard-freeze Stokes I from this epoch onward.
+    initial_lr, weight_decay, lr_decay_rate, lr_decay_steps : float
+        Optimizer schedule, see :func:`make_polarized_optimizer`.
+    optimizer_name : {"adamw", "adam", "adamax"}
+        Optimizer to build.
+    neg_weight, w_sparse_weight, b_sparse_weight : float
+        Weights for the I-negativity and per-net sparsity penalties.
+    p_le_i_weight, compact_weight, compact_pol_weight : float
+        Weights for the ``P<=I``, compactness, and polarized-compactness priors.
+    pol_support_weight, pol_l1_weight, dyn_compact_weight, flux_weight : float
+        Weights for the polarization support, polarized-L1, dynamic-compactness,
+        and total-flux priors. All are passed to
+        :func:`~neuraldmd.losses.polarized_loss_fn`.
+    flux_target : float or None
+        Total flux for the lightcurve anchor; ``None`` disables it.
+    pol_support_tau : float
+        Gate scale of the polarization support prior.
+    print_every : int
+        Epoch interval for the progress line.
+    early_stop_chi2 : float or None
+        Stop once every per-key chi-squared stays at or below this for
+        ``early_stop_epochs`` consecutive epochs; ``None`` disables.
+    early_stop_epochs : int
+        Consecutive epochs required to trigger early stopping.
+    fold_epoch_key : bool
+        Derive a fresh PRNG key per epoch instead of reusing ``key``.
+
     Returns
     -------
     model, history
         ``history`` has ``"total"`` (list) and ``"chi2"`` (dict of per-key lists,
         keyed by ``products`` in the circular basis and by the loader keys
-        otherwise).
+        otherwise), plus ``"penalty"`` (raw per-epoch values over
+        :data:`PENALTY_KEYS`) and ``"penalty_weights"``. A term's weighted
+        contribution to the loss is ``penalty[k][epoch] * penalty_weights[k]``.
     """
     os.makedirs(models_dir, exist_ok=True)
     optimizer = make_polarized_optimizer(
@@ -543,11 +656,27 @@ def train_polarized_model(
     tgt_eval = {k: jnp.asarray(loader.op.targets[k]) for k in hist_keys}
     sig_eval = {k: jnp.asarray(loader.op.sigmas[k]) for k in hist_keys}
     msk_eval = {k: jnp.asarray(loader.op.masks[k]) for k in hist_keys}
+    # Raw penalties and their weights are stored separately: raw stays interpretable
+    # when a weight is 0, and the weighted contribution is the product.
+    penalty_weights = {
+        "neg_I": float(neg_weight),
+        "p_penalty": float(p_le_i_weight),
+        "flux_penalty": float(flux_weight) if flux_target is not None else 0.0,
+        "compact_penalty": float(compact_weight),
+        "dyn_compact_penalty": float(dyn_compact_weight),
+        "compact_pol_penalty": float(compact_pol_weight),
+        "support_penalty": float(pol_support_weight),
+        "pol_l1_penalty": float(pol_l1_weight),
+        "w_sparsity": float(w_sparse_weight),
+        "b_sparsity": float(b_sparse_weight),
+    }
     history = {
         "total": [],
         "grad_norm": [],
         "chi2": {k: [] for k in hist_keys},
         "train_chi2": {k: [] for k in hist_keys},
+        "penalty": {k: [] for k in PENALTY_KEYS},
+        "penalty_weights": penalty_weights,
     }
     best_metric = float("inf")
     best_model = None
@@ -564,7 +693,7 @@ def train_polarized_model(
             pol_scale = jnp.asarray(0.0 if freeze_pol else ramp, dtype=jnp.float32)
             # optional hard freeze of the (by now converged) I during the pol tail
             freeze_i = freeze_intensity or (freeze_i_after is not None and epoch >= freeze_i_after)
-            model, opt_state, loss, chi2, grad_norm = polarized_train_epoch(
+            model, opt_state, loss, chi2, grad_norm, penalties = polarized_train_epoch(
                 model,
                 opt_state,
                 epoch_data,
@@ -614,14 +743,21 @@ def train_polarized_model(
             for k in hist_keys:
                 history["chi2"][k].append(eval_chi2[k])
                 history["train_chi2"][k].append(float(chi2[k]))
+            for k in PENALTY_KEYS:
+                history["penalty"][k].append(float(penalties[k]))
             max_chi2 = float(max(eval_chi2.values()))
 
             pbar.set_postfix(loss=f"{float(loss):.4f}", chi2=f"{max_chi2:.3f}")
             pbar.update(1)
             if (epoch + 1) % print_every == 0:
                 per_key = "  ".join(f"chi2_{k}={eval_chi2[k]:.3f}" for k in hist_keys)
+                # how much of the loss is priors rather than data
+                prior = sum(float(penalties[k]) * penalty_weights[k] for k in PENALTY_KEYS)
+                total = float(loss)
+                share = 100.0 * prior / total if total > 0 else float("nan")
                 print(
-                    f"Epoch {epoch + 1}/{num_epochs}  loss={float(loss):.5f}  {per_key}",
+                    f"Epoch {epoch + 1}/{num_epochs}  loss={total:.5f}  {per_key}"
+                    f"  priors={prior:.4f} ({share:.1f}% of loss)",
                     flush=True,
                 )
 

@@ -240,13 +240,18 @@ def polarized_loss_fn(
     vis_stokes = {
         s: jnp.einsum("tvp,pt->tv", A_batch, images[s].astype(jnp.complex64)) for s in model.stokes
     }
+    # Raw sums are accumulated alongside the weighted total so the sparsity priors
+    # (on at weight 1.0 by default) show up in the aux. Summation order of
+    # `sparse_total` is unchanged, so its value is bit-identical to before.
     sparse_total = 0.0
+    w_sparse_raw = 0.0
+    b_sparse_raw = 0.0
     for w0, w, b0, b in modes:
-        sparse_total = (
-            sparse_total
-            + w_sparse_weight * sparsity_loss(w0, w)
-            + b_sparse_weight * sparsity_loss(b0, b)
-        )
+        ws = sparsity_loss(w0, w)
+        bs = sparsity_loss(b0, b)
+        w_sparse_raw = w_sparse_raw + ws
+        b_sparse_raw = b_sparse_raw + bs
+        sparse_total = sparse_total + w_sparse_weight * ws + b_sparse_weight * bs
 
     if basis == "stokes":
         chi2 = {s: _vis_chi2(vis_stokes[s], targets[s], sigmas[s], masks[s]) for s in model.stokes}
@@ -402,5 +407,7 @@ def polarized_loss_fn(
         "compact_pol_penalty": compact_pol_penalty,
         "support_penalty": support_penalty,
         "pol_l1_penalty": pol_l1_penalty,
+        "w_sparsity": jnp.asarray(w_sparse_raw),
+        "b_sparsity": jnp.asarray(b_sparse_raw),
         "basis": basis,
     }
