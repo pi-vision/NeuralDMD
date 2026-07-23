@@ -291,47 +291,43 @@ polarization fraction untouched.
     font=\small, x=1cm, y=1cm, >={Latex[length=2mm]},
     box/.style = {draw, rounded corners=2pt, minimum height=7mm, align=center, inner sep=3pt},
     net/.style = {box, fill=blue!8},
+    shared/.style = {box, fill=orange!16},
     op/.style  = {box, fill=black!4},
     res/.style = {box, fill=green!10},
     lab/.style = {font=\scriptsize\itshape},
   ]
-  % one network, four field outputs
-  \node[op] (in) at (0,-1.05) {$x,\,y$};
-  \node[net, minimum width=15mm, minimum height=20mm] (W) at (2.4,-1.05) {network\\$W$};
-  \node (oI) at (4.7, 0.15) {$w^{I}_j$};
-  \node (oq) at (4.7,-0.75) {$w^{q}_j$};
-  \node (ou) at (4.7,-1.35) {$w^{u}_j$};
-  \node (ov) at (4.7,-2.25) {$w^{v}_j$};
+  % ---- row 1 (y=0): sky model ----
+  \node[op]  (in)  at (0,0)   {$x,\,y$};
+  \node[net, minimum width=15mm, minimum height=22mm] (W) at (2.3,0) {network\\$W$};
+  \node (mI) at (4.6, 0.85) {$w^{I}_j$};
+  \node (mq) at (4.6, 0.28) {$w^{q}_j$};
+  \node (mu) at (4.6,-0.28) {$w^{u}_j$};
+  \node (mv) at (4.6,-0.85) {$w^{v}_j$};
+  \node[op, minimum width=18mm] (sum) at (7.6,0) {modal sum\\Eq.~\eqref{eq:fieldI}};
+  \node[res, minimum width=18mm] (cubes) at (11.2,0) {$I,Q,U,V$\\{\scriptsize movie (chart)}};
   \draw[->] (in) -- (W);
-  \foreach \o in {oI,oq,ou,ov} { \draw[->] (W) -- (\o); }
-  \node[lab, align=left] at (4.75,-3.05) {modes of\\ $I,q,u,v$};
-
-  % shared spectrum + amplitudes into the modal sum
-  \node[op] (om) at (7.6,-2.5) {$\Omega_j,\ b_j$};
-  \node[op, minimum width=20mm] (sum) at (7.6,-1.05) {modal sum\\Eq.~\eqref{eq:fieldI}};
-  \node[res, minimum width=17mm] (cubes) at (11.1,-1.05) {$I,Q,U,V$\\{\scriptsize (chart)}};
-  \foreach \o in {oI,oq,ou,ov} { \draw[->] (\o) -- (sum); }
-  \draw[->] (om) -- (sum);
+  \foreach \m in {mI,mq,mu,mv} { \draw[->] (W) -- (\m); }
+  \foreach \m in {mI,mq,mu,mv} { \draw[->] (\m) -- (sum); }
   \draw[->] (sum) -- (cubes);
 
-  % measurement + loss + gradient
-  \node[op] (ft)   at (11.1,-3.9) {$\mathcal{F}$, sample};
-  \node[op] (prod) at (7.6, -3.9) {products\\Eq.~\eqref{eq:products}};
-  \node[op] (gain) at (5.0, -3.9) {gains\\Eq.~\eqref{eq:rime}};
-  \node[res](chi)  at (1.4, -3.9) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
+  % ---- row 2 (y=-2.4): amplitudes + shared spectrum ----
+  \node[op]     (amp)  at (2.9,-2.4) {amplitudes\\$b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$};
+  \node[shared] (spec) at (7.6,-2.4) {spectrum $\Omega_j$\ \ {\scriptsize (shared by all)}};
+  \draw[->] (amp)  |- ++(0,0.9) -| (sum.south west);
+  \draw[->] (spec) -- (sum);
+
+  % ---- row 3 (y=-4.4): instrument, right to left ----
+  \node[op]  (ft)   at (11.2,-4.4) {$\mathcal{F}$, sample};
+  \node[op]  (pr)   at (7.6, -4.4) {products\\Eq.~\eqref{eq:products}};
+  \node[op]  (gn)   at (4.4, -4.4) {gains\\Eq.~\eqref{eq:rime}};
+  \node[res] (chi)  at (1.4, -4.4) {$\displaystyle\mathcal{L}=\!\sum_p\chi^2_p$};
   \draw[->] (cubes) -- (ft);
-  \draw[->] (ft) -- (prod);
-  \draw[->] (prod) -- (gain);
-  \draw[->] (gain) -- (chi);
-  \draw[->, dashed] (chi.south) |- ++(0,-0.5) -| (W.south) node[lab, pos=0.25, below] {gradient descent};
+  \draw[->] (ft) -- (pr);
+  \draw[->] (pr) -- (gn);
+  \draw[->] (gn) -- (chi);
+  \draw[->, dashed] (chi.north) |- (2.3,-1.5) node[lab, pos=0.32, left] {gradient} -- (W.south);
 \end{tikzpicture}
-\caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes of every
-Stokes parameter. A shared spectrum $\Omega_j$ and per-Stokes amplitudes
-amplitudes $b_j$ evolve them in time through the modal sum, giving the Stokes movie.
-The chart, Fourier sampling, correlation products and station gains then turn it
-into the model visibilities compared with the data; the gradient of $\mathcal{L}$
-updates $W$. Time is not an input to $W$: it enters only through
-$e^{\Omega_j\tsc t}$, which keeps the spectrum explicit.}
+\caption{One coordinate network $W$ maps $(x,y)$ to the spatial modes $w^{I}_j,w^{q}_j,w^{u}_j,w^{v}_j$ of the four fields, and each field carries its own amplitudes $b^{I}_j,b^{q}_j,b^{u}_j,b^{v}_j$. The spectrum $\Omega_j$ is the single quantity shared across all four (shaded), so the mode index $j$ means the same frequency in every Stokes parameter. The modal sum evolves the fields in time (time is not an input to $W$; it enters only through $e^{\Omega_j\tsc t}$), the chart maps them to $I,Q,U,V$, and the Fourier sampling, correlation products and station gains give the model visibilities; the gradient of $\mathcal{L}$ updates $W$.}
 \label{fig:arch}
 \end{figure}
 
