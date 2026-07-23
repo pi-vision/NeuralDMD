@@ -178,3 +178,56 @@ def test_model_trains():
         if step == 0:
             first = float(loss)
     assert float(loss) < first
+
+
+# --------------------------------------------------------------------------
+# golden forward pass
+# --------------------------------------------------------------------------
+
+# Captured from the pre-refactor forward pass. These pin `stokes_fields` while
+# the shared-Omega / shared-trunk plumbing is threaded through it: that work
+# must not move a single output. Each tuple is
+# (img[0, 0], img[7, 2], img[-1, -1], img.mean(), img.std()).
+GOLDEN_FORWARD = {
+    "fractional": {
+        "I": (-1.38729119, -0.669709265, 0.236030936, -0.822372794, 0.697149158),
+        "Q": (0.301011741, 5.74086989e-05, 0.0372040682, 0.0654011071, 0.0995814279),
+        "U": (-0.0121491598, -0.0608569235, 0.02988014, -0.0373474583, 0.0860256255),
+    },
+    "direct": {
+        "I": (-1.38729119, -0.669709265, 0.236030936, -0.822372794, 0.697149158),
+        "Q": (1.07651234, -0.454574436, 0.940788031, -0.224100128, 1.00840151),
+        "U": (-1.44087112, -0.000659632031, 0.973104835, -0.400629342, 0.970730722),
+    },
+    "iscaled": {
+        "I": (-1.38729119, -0.669709265, 0.236030936, -0.822372794, 0.697149158),
+        "Q": (-0.853832066, 0.196962118, 0.131260499, 0.147672057, 0.579255283),
+        "U": (1.03288805, 0.000294507743, 0.13473089, 0.326774538, 0.54517591),
+    },
+    "expm": {
+        "I": (-1.38729119, -0.669709265, 0.236030936, -0.822372794, 0.697149158),
+        "Q": (-0.691972435, 0.196962103, 0.117701188, 0.141675875, 0.523117006),
+        "U": (0.926179051, 0.000285811315, 0.121744312, 0.304236829, 0.501046538),
+    },
+    "expm_full": {
+        "I": (1.07628942, 1.00423467, 2.52018285, 1.53175402, 1.31218517),
+        "Q": (0.536846519, -0.295346349, 1.2567358, -0.0373856463, 1.37919176),
+        "U": (-0.718548834, -0.000428576488, 1.29990554, -0.10353341, 0.934732914),
+    },
+}
+
+
+@pytest.mark.parametrize("chart", sorted(GOLDEN_FORWARD))
+def test_golden_forward_unchanged(chart):
+    """Every chart's forward pass still matches the recorded reference."""
+    m = PolarizedNeuralDMD(
+        ("I", "Q", "U"), r=3, key=jax.random.PRNGKey(0), pol_param=chart, **MODEL_KW
+    )
+    xy, times = _xy_times()
+    images, _ = m.stokes_fields(xy, times, {"I": 1.5}, {"I": 0.0})
+    for stokes, expected in GOLDEN_FORWARD[chart].items():
+        a = np.asarray(images[stokes])
+        got = (float(a[0, 0]), float(a[7, 2]), float(a[-1, -1]), float(a.mean()), float(a.std()))
+        np.testing.assert_allclose(
+            got, expected, rtol=1e-6, atol=1e-7, err_msg=f"{chart}/{stokes} drifted"
+        )
