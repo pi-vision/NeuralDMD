@@ -27,10 +27,11 @@
 
 \begin{abstract}
 \noindent
-We extend \neuralDMD to full polarization. Each Stokes parameter gets its own
-spatial modes and complex amplitudes, but all share one bank of temporal
-frequencies, since the frequencies belong to the flow rather than to the
-observable. Polarization is built through a matrix-exponential chart, enforcing
+We extend \neuralDMD to full polarization. A single spatial network and a single
+bank of temporal frequencies serve every Stokes parameter; only the readouts --- a
+thin head and a set of complex amplitudes per field --- are separate. The sharing
+is the physical statement that structure and rates belong to the emitting plasma
+rather than to the Stokes parameter one happens to measure. Polarization is built through a matrix-exponential chart, enforcing
 $P\le I$ and support by construction rather than by penalty. Station gains are
 solved jointly and the total flux is supplied from the data.
 \end{abstract}
@@ -57,6 +58,26 @@ $\Theta=[\Theta_w,\Theta_\Omega,\Theta_b]$,
 \end{equation}
 the spatial modes being a coordinate MLP evaluable at any $(x,y)$.
 
+\paragraph{One trunk, per-Stokes heads.}
+The four raw fields we need --- one for intensity and three for polarization
+(Sec.~\ref{sec:chart}) --- are not independent objects: they are different
+projections of the same emitting plasma, so their structure lives in the same
+places. We therefore evaluate them from a \emph{single} spatial network. Encoded
+coordinates pass through one trunk $\Theta_w$, shared by every Stokes parameter,
+and a thin linear head per field reads out that field's modes,
+\begin{equation}
+  h(x,y) = \mathrm{trunk}(\gamma(x,y);\Theta_w) \in \mathbb{R}^{d},
+  \qquad
+  \bigl[w^{\SP}_0,\,w^{\SP}_1,\dots,w^{\SP}_r\bigr] = A^{\SP} h(x,y) + c^{\SP},
+  \label{eq:trunk}
+\end{equation}
+with $\gamma$ the positional encoding and $A^{\SP}\in\mathbb{R}^{(2r+1)\times d}$
+the head of field $\SP$ (real width $2r+1$: the static mode $w^{\SP}_0$ plus the
+real and imaginary parts of $r$ complex modes). Sharing the trunk states that
+polarized structure appears where intensity structure appears --- a spatial prior
+carried by the architecture, costing no penalty term. What stays per-field is the
+readout: each Stokes parameter keeps its own modes and its own amplitudes.
+
 \paragraph{Real-valued fields.}
 Each physical field is real, so its complex modes occur in conjugate pairs. Write
 $\SP$ for a field label and
@@ -69,9 +90,12 @@ $\SP$ for a field label and
 where the $j=0$ term is a real static component ($\Omega_0=0$). Time is normalized
 to $[0,1]$ over the observing window and $\tsc=200$ sets the range of representable
 rates. Note that $\Omega_j$ carries \emph{no} field label: one bank of frequencies
-serves every Stokes parameter, while the spatial modes $w^{\SP}_j$ and the complex
-amplitudes $b^{\SP}_j$ stay separate. This is the central modelling choice, and
-Sec.~\ref{sec:sharing} gives the reason.
+serves every Stokes parameter, exactly as one trunk serves them in space. The
+model is thus shared in both arguments and separate only in the readouts --- the
+spatial heads $A^{\SP}$ and the complex amplitudes $b^{\SP}_j$. Those readouts are
+what carry the physics we want to measure: which spatial pattern and which
+harmonic each Stokes parameter occupies, and with what relative phase.
+Sec.~\ref{sec:sharing} gives the argument for the temporal half.
 
 \paragraph{Constraints imposed by construction.}
 The spectrum is bounded so that no mode grows without limit, and band-limited,
@@ -111,6 +135,7 @@ with polarization vanishing wherever there is no emission. Free $(Q,U,V)$ fields
 respect neither, and can reach $\chi^2\approx1$ on unphysical images.
 
 \paragraph{Chart.}
+\label{sec:chart}
 We therefore build the polarized sky from four raw fields
 $f^{I},f^{q},f^{u},f^{v}$ of the form of Eq.~\eqref{eq:field}. The intensity is
 scaled to physical units,
@@ -261,51 +286,65 @@ polarization fraction untouched.
 \centering
 \begin{tikzpicture}[
     font=\small, x=1cm, y=1cm,
-    box/.style   = {draw, rounded corners=2pt, minimum height=8mm,
+    box/.style   = {draw, rounded corners=2pt, minimum height=7.5mm,
                     minimum width=19mm, align=center, inner sep=2pt},
-    net/.style   = {box, fill=blue!8},
+    head/.style  = {box, fill=blue!8, minimum width=14mm, minimum height=6mm},
     shared/.style= {box, fill=orange!18},
     op/.style    = {box, fill=black!4},
     res/.style   = {box, fill=green!10},
     ar/.style    = {-{Latex[length=2mm]}},
   ]
-  \node[op]     (xy)    at (0,    0)    {$(x,y)$};
-  \node[op]     (z1)    at (0,   -1.05) {latent};
-  \node[op]     (z2)    at (0,   -2.10) {latent};
-  \node[net]    (nw)    at (3,    0)    {$\Theta_w$};
-  \node[shared] (no)    at (3,   -1.05) {$\Theta_\Omega$\\[-2pt]{\scriptsize shared}};
-  \node[net]    (nb)    at (3,   -2.10) {$\Theta_b$};
-  \node         (ow)    at (5.6,  0)    {$w^{\SP}_j(x,y)$};
-  \node         (oo)    at (5.6, -1.05) {$\Omega_j$};
-  \node         (ob)    at (5.6, -2.10) {$b^{\SP}_j$};
-  \node[op]     (sum)   at (9.0, -1.05) {modal sum\\Eq.~\eqref{eq:field}};
-  \node[res]    (chart) at (12.3,-1.05) {chart\\Eq.~\eqref{eq:expm}};
+  % ---------- spatial: one trunk, four heads ----------
+  \node[op]     (xy)  at (0,   -0.9) {$(x,y)$};
+  \node[op]     (enc) at (2.5, -0.9) {encode $\gamma$};
+  \node[shared] (tr)  at (5.2, -0.9) {trunk $\Theta_w$\\{\scriptsize shared}};
+  \node[head] (hI) at (8.2,  0.45) {head $I$};
+  \node[head] (hq) at (8.2, -0.30) {head $q$};
+  \node[head] (hu) at (8.2, -1.05) {head $u$};
+  \node[head] (hv) at (8.2, -1.80) {head $v$};
+  \draw[ar] (xy) -- (enc);  \draw[ar] (enc) -- (tr);
+  \foreach \h in {hI,hq,hu,hv} { \draw[ar] (tr) -- (\h); }
 
-  \draw[ar] (xy) -- (nw);  \draw[ar] (nw) -- (ow);
-  \draw[ar] (z1) -- (no);  \draw[ar] (no) -- (oo);
-  \draw[ar] (z2) -- (nb);  \draw[ar] (nb) -- (ob);
-  \draw[ar] (ow.east) -| (sum.north);
-  \draw[ar] (oo.east) -- (sum.west);
-  \draw[ar] (ob.east) -| (sum.south);
+  % ---------- temporal: one spectrum, per-field amplitudes ----------
+  \node[op]     (lat) at (0,   -3.3) {latent};
+  \node[shared] (om)  at (2.5, -3.3) {$\Theta_\Omega$\\{\scriptsize shared}};
+  \node[head]   (bn)  at (5.2, -3.3) {$\Theta_b^{\SP}$};
+  \draw[ar] (lat) -- (om);
+  \draw[ar] (lat) -- ++(0,-1.0) -| (bn);
+
+  % ---------- combine, chart ----------
+  \node[op]  (sum)   at (11.3,-0.9) {modal sum\\Eq.~\eqref{eq:field}};
+  \node[res] (chart) at (11.3,-3.3) {chart\\Eq.~\eqref{eq:expm}};
+  \foreach \h in {hI,hq,hu,hv} { \draw[ar] (\h) -- (sum); }
+  \draw[ar] (om.north) |- ++(0,0.9) -| (sum.south);
+  \draw[ar] (bn) -| (sum);
   \draw[ar] (sum) -- (chart);
 
-  \node[res] (cubes) at (12.3,-3.25) {$I,Q,U,V$};
-  \node[op]  (ft)    at (9.0, -3.25) {$\mathcal{F}$, sample};
-  \node[op]  (prod)  at (5.6, -3.25) {products\\Eq.~\eqref{eq:products}};
-  \node[op]  (gain)  at (2.6, -3.25) {gains\\Eq.~\eqref{eq:rime}};
-  \node[res] (chi)   at (0,   -3.25) {$\chi^2$};
+  % ---------- instrument: right to left ----------
+  \node[res] (cubes) at (11.3,-5.4) {$I,Q,U,V$};
+  \node[op]  (ft)    at (8.2, -5.4) {$\mathcal{F}$, sample};
+  \node[op]  (prod)  at (5.2, -5.4) {products\\Eq.~\eqref{eq:products}};
+  \node[op]  (gain)  at (2.5, -5.4) {gains\\Eq.~\eqref{eq:rime}};
+  \node[res] (chi)   at (0,   -5.4) {$\chi^2$};
   \draw[ar] (chart) -- (cubes);
   \draw[ar] (cubes) -- (ft);
   \draw[ar] (ft)    -- (prod);
   \draw[ar] (prod)  -- (gain);
   \draw[ar] (gain)  -- (chi);
 \end{tikzpicture}
-\caption{Top row: the sky model. Bottom row: the instrument, from the sky to the
-$\chi^2$ against the observed correlation products.}
+\caption{A single spatial trunk and a single spectrum serve every Stokes
+parameter (shaded); only the readouts --- the per-field heads and amplitudes ---
+are separate. The chart maps the four raw fields to Stokes parameters, which are
+transformed, sampled at the observed baselines, combined into correlation
+products and corrupted by station gains before the $\chi^2$.}
 \label{fig:arch}
 \end{figure}
 
 \section{Validation}
+
+The numbers below were obtained with a per-field spatial network rather than the
+shared trunk of Eq.~\eqref{eq:trunk}; the shared spectrum was in use throughout.
+Evaluation of the shared-trunk variant is in progress.
 
 On synthetic polarized truths observed with EHT coverage the model recovers the
 polarization structure with NRMSE$_Q\approx0.11$ and a polarization-angle error
