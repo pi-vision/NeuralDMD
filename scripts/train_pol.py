@@ -765,9 +765,19 @@ def main():
 
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:
+        # ehtim indexes a movie by UT hour, so the exported file must carry the
+        # observation's clock, not our normalized [0, 1] axis. Writing normalized
+        # times produces a file that ehtim refuses to score against the very data
+        # it was fitted to.
+        export_times = np.asarray(truth["times"], dtype=np.float64)
+        anchors = getattr(op, "time_anchors_hr", None)
+        if anchors is not None:
+            t0, t1 = float(anchors[0]), float(anchors[1])
+            export_times = t0 + export_times * (t1 - t0)
+            print(f"Recon movie clock: {t0:.3f}..{t1:.3f} UT", flush=True)
         recon_movie = to_ehtim_movie(
             recon["I"].astype(np.float64),
-            truth["times"],
+            export_times,
             fov_uas=args.fov_uas,
             qframes=recon["Q"].astype(np.float64),
             uframes=recon["U"].astype(np.float64),
