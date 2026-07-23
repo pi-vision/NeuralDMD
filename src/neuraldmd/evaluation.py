@@ -856,3 +856,71 @@ def plot_training_history(history, path, floor=None, title=None):
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+
+
+def mode_table(model, npix, times, window_hr=None, fov_x=np.pi, fov_y=np.pi):
+    """Per-mode summary of a coupled polarized model, on the shared mode index.
+
+    With a shared spectrum, mode ``k`` means the same frequency in every coupled
+    field, so per-Stokes amplitudes and relative phases become comparable. The
+    shared-vs-private power split answers whether polarization actually lives on
+    the shared frequency ladder or needs modes of its own.
+
+    Parameters
+    ----------
+    model : PolarizedNeuralDMD
+        A model built with ``couple`` other than ``"none"``.
+    npix : int
+        Image side length; the table is evaluated on the full pixel grid.
+    times : array_like
+        ``(T,)`` normalized frame times.
+    window_hr : float or None
+        Duration the normalized time axis spans, in hours. When given, mode
+        frequencies are also reported in rad/hr as ``theta * t_scale / window_hr``.
+    fov_x, fov_y : float
+        Coordinate extent, matching the training grid.
+
+    Returns
+    -------
+    dict
+        ``alpha`` and ``theta`` ``(r,)``; ``freq_rad_per_hr`` when ``window_hr``
+        is given; ``n_shared``; ``fields`` mapping each coupled field to
+        ``{"b_abs", "b_arg", "shared_power", "private_power"}``; and
+        ``lag_vs_intensity`` in radians when Stokes I shares the bank.
+    """
+    xy = jnp.asarray(pixel_grid_coords(npix, npix, fov_x, fov_y))
+    out = model.aligned_modes(xy, jnp.asarray(times))
+    omega = np.asarray(out["Omega"])
+    n_shared = int(out["n_shared"])
+
+    table = {
+        "alpha": omega.real.tolist(),
+        "theta": omega.imag.tolist(),
+        "n_shared": n_shared,
+        "couple": model.couple,
+        "fields": {},
+    }
+    if window_hr:
+        table["freq_rad_per_hr"] = (omega.imag * model.intensity.t_scale / window_hr).tolist()
+
+    b_by_field = {}
+    for name, (_, _, _, b) in out["fields"].items():
+        b = np.asarray(b)
+        b_by_field[name] = b
+        power = np.abs(b) ** 2
+        total = float(power.sum())
+        table["fields"][name] = {
+            "b_abs": np.abs(b).tolist(),
+            "b_arg": np.angle(b).tolist(),
+            "shared_power": float(power[:n_shared].sum() / total) if total > 0 else 0.0,
+            "private_power": float(power[n_shared:].sum() / total) if total > 0 else 0.0,
+        }
+
+    if "intensity" in b_by_field:
+        ref = np.angle(b_by_field["intensity"])
+        table["lag_vs_intensity"] = {
+            name: np.angle(np.exp(1j * (np.angle(b) - ref))).tolist()
+            for name, b in b_by_field.items()
+            if name != "intensity"
+        }
+    return table

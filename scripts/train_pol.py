@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 
@@ -153,6 +154,31 @@ def parse_args():
         type=int,
         default=None,
         help="DMD modes for the pol fields (default = --r; use < r to starve capacity)",
+    )
+    # ── shared temporal bank / spatial trunk across Stokes ──
+    ap.add_argument(
+        "--couple",
+        default="none",
+        choices=["none", "pol", "all"],
+        help="share one temporal spectrum: 'pol' ties the polarization fields to "
+        "each other (Q,U are one spin-2 field), 'all' adds Stokes I so mode k "
+        "means the same frequency in every Stokes and per-mode polarimetry is "
+        "defined. Default 'none' = every field fits its own spectrum",
+    )
+    ap.add_argument(
+        "--n-shared-modes",
+        type=int,
+        default=None,
+        help="how many of the r modes come from the shared bank (default: all). "
+        "Leaving some private lets polarization carry a periodicity Stokes I "
+        "does not have; the shared-vs-private power split in mode_table.json "
+        "then measures whether it does",
+    )
+    ap.add_argument(
+        "--share-trunk",
+        action="store_true",
+        help="also share the spatial trunk, so pol fields are thin heads on the "
+        "bank owner's features (encodes: pol structure lives where I structure is)",
     )
     ap.add_argument(
         "--pol-frequencies",
@@ -394,6 +420,9 @@ def main():
         num_layers=args.num_layers,
         num_frequencies=args.frequencies,
         theta_max=args.theta_max,
+        couple=args.couple,
+        n_shared=args.n_shared_modes,
+        share_trunk=args.share_trunk,
     )
 
     if args.fit_gains:
@@ -643,8 +672,12 @@ def main():
 
         xy_grid = ev.pixel_grid_coords(args.npix, args.npix)  # jax accepts numpy
         pol_field_name = "Q" if args.pol_param == "direct" else "mfrac"
-        for name, sub in (("I", model.intensity), (pol_field_name, model.frac)):
-            w0, w, om, b0, b = sub(xy_grid)
+        # Under coupling a field borrows its spectrum, so its own temporal net is
+        # (partly) untrained -- read the effective Omega the model actually uses.
+        shared_kw = model._shared_state(jnp.asarray(xy_grid))
+        for name, attr in (("I", "intensity"), (pol_field_name, "frac")):
+            sub = getattr(model, attr)
+            w0, w, om, b0, b = sub(xy_grid, **shared_kw[attr])
             w_s, om_s, _ = ev.sort_modes_by_lambda(w, om, b)
             ev.plot_modes(
                 np.asarray(w_s),
@@ -666,6 +699,25 @@ def main():
         plt.close("all")
     except Exception as exc:
         print(f"[warn] mode plots failed: {exc}", flush=True)
+
+    # per-mode table on the shared index: recovered frequencies, per-Stokes
+    # amplitudes and phase lags, and how much power sits on shared vs private modes
+    if args.couple != "none":
+        try:
+            window_hr = None
+            anchors = getattr(op, "time_anchors_hr", None)
+            if anchors is not None:
+                window_hr = float(anchors[1]) - float(anchors[0])
+            table = ev.mode_table(model, args.npix, truth["times"], window_hr=window_hr)
+            (out / "mode_table.json").write_text(json.dumps(table, indent=2))
+            for name, entry in table["fields"].items():
+                print(
+                    f"[modes] {name}: shared power {entry['shared_power']:.3f}, "
+                    f"private {entry['private_power']:.3f}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[warn] mode table failed: {exc}", flush=True)
 
     # export the reconstruction as an ehtim HDF5 movie (I, Q, U) for video / scoring
     try:
