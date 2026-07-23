@@ -228,6 +228,9 @@ def test_golden_forward_unchanged(chart):
     for stokes, expected in GOLDEN_FORWARD[chart].items():
         a = np.asarray(images[stokes])
         got = (float(a[0, 0]), float(a[7, 2]), float(a[-1, -1]), float(a.mean()), float(a.std()))
+        # atol=1e-6 (not 1e-7): near-zero pixels drift ~1e-7 across XLA/hardware
+        # (measured on CI), which is float32 noise, not a code change. A real
+        # forward regression moves these outputs by O(0.1), far above this floor.
         np.testing.assert_allclose(
-            got, expected, rtol=1e-6, atol=1e-7, err_msg=f"{chart}/{stokes} drifted"
+            got, expected, rtol=1e-6, atol=1e-6, err_msg=f"{chart}/{stokes} drifted"
         )
