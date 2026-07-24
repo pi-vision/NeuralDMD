@@ -59,7 +59,18 @@ def main() -> None:
     ap.add_argument("--time-fraction", type=float, default=0.6)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--pretrain-steps", type=int, default=2000)
+    ap.add_argument("--lr-factor", type=float, default=1.0, help="<1 enables plateau LR decay")
+    ap.add_argument("--lr-patience", type=int, default=500)
     ap.add_argument("--early-stop-chi2", type=float, default=1.0, help="<=0 disables early stopping")
+    ap.add_argument("--neg-weight", type=float, default=1.0)
+    ap.add_argument("--w-sparse-weight", type=float, default=1.0, help="L1 on spatial modes")
+    ap.add_argument(
+        "--b-sparse-weight",
+        type=float,
+        default=1.0,
+        help="L1 on the amplitudes b -- shrinks dynamic amplitude directly; lower it to let "
+        "the fit carry more variability",
+    )
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -74,6 +85,13 @@ def main() -> None:
     plots_dir = args.out / "plots"
     models_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # record the effective config so every run is auditable (which penalties were on)
+    import json
+
+    (args.out / "config.json").write_text(
+        json.dumps({k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}, indent=2)
+    )
 
     frames, times = load_gt_cube(args.gt)
     height, width = frames.shape[1:]
@@ -114,10 +132,15 @@ def main() -> None:
         frame_max=frame_max,
         frame_min=frame_min,
         initial_lr=args.lr,
+        lr_factor=args.lr_factor,
+        lr_patience=args.lr_patience,
         print_every=100,
         plot_every=500,
         early_stop_chi2=(args.early_stop_chi2 if args.early_stop_chi2 > 0 else None),
         early_stop_epochs=3,
+        neg_weight=args.neg_weight,
+        w_sparse_weight=args.w_sparse_weight,
+        b_sparse_weight=args.b_sparse_weight,
     )
     eqx.tree_serialise_leaves(str(models_dir / f"trained_model_r{args.r}_f{args.frequencies}.eqx"), model)
     print(f"[stage1] done; final chi2_vis ~ {history.get('chi2_vis', ['?'])[-1] if history else '?'}")

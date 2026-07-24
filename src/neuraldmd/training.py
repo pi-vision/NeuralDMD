@@ -34,6 +34,9 @@ def train_step(
     optimizer,
     frame_max,
     frame_min,
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
 ):
     """One optimizer step on a scalar :class:`~neuraldmd.model.NeuralDMD`.
 
@@ -63,6 +66,10 @@ def train_step(
         Optimizer to step with.
     frame_max, frame_min : float
         Output scaling to physical units.
+    neg_weight, w_sparse_weight, b_sparse_weight : float
+        Weights for the negativity and the mode / amplitude L1 sparsity
+        penalties. ``b_sparse_weight`` acts directly on the dynamic amplitudes
+        ``b``, so it sets how much variability the fit is willing to carry.
 
     Returns
     -------
@@ -87,6 +94,9 @@ def train_step(
         time_indices,
         frame_max,
         frame_min,
+        neg_weight,
+        w_sparse_weight,
+        b_sparse_weight,
     )
     updates, opt_state = optimizer.update(grads, opt_state, eqx.filter(model, eqx.is_array))
     model = eqx.apply_updates(model, updates)
@@ -94,7 +104,18 @@ def train_step(
 
 
 @eqx.filter_jit
-def train_epoch_jit(model, opt_state, batch_list, optimizer, key, frame_max, frame_min):
+def train_epoch_jit(
+    model,
+    opt_state,
+    batch_list,
+    optimizer,
+    key,
+    frame_max,
+    frame_min,
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
+):
     """Scan :func:`train_step` over one epoch's batches.
 
     Coordinates get small jitter each step, which regularizes the coordinate
@@ -166,6 +187,9 @@ def train_epoch_jit(model, opt_state, batch_list, optimizer, key, frame_max, fra
             optimizer,
             frame_max,
             frame_min,
+            neg_weight,
+            w_sparse_weight,
+            b_sparse_weight,
         )
         rec_loss, chi2_vis, chi2_amp, chi2_cp = aux
         return (model, opt_state, key), (loss, rec_loss, chi2_vis, chi2_amp, chi2_cp)
@@ -1047,6 +1071,9 @@ def train_model(
     early_stop_chi2=1.0,
     early_stop_epochs=3,
     fold_epoch_key=True,
+    neg_weight: float = 1.0,
+    w_sparse_weight: float = 1.0,
+    b_sparse_weight: float = 1.0,
 ):
     """Train on visibilities; see loss_fn for the objective.
 
@@ -1115,7 +1142,16 @@ def train_model(
             # stream is distinct (previously the same key was reused every epoch).
             epoch_key = jax.random.fold_in(key, epoch) if fold_epoch_key else key
             model, opt_state, (loss, rec, chi2_vis, chi2_amp, chi2_cp) = train_epoch_jit(
-                model, opt_state, epoch_data, optimizer, epoch_key, frame_max, frame_min
+                model,
+                opt_state,
+                epoch_data,
+                optimizer,
+                epoch_key,
+                frame_max,
+                frame_min,
+                neg_weight,
+                w_sparse_weight,
+                b_sparse_weight,
             )
 
             history["total"].append(float(loss))
