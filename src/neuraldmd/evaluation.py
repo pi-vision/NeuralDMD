@@ -139,13 +139,13 @@ def calc_psnr(frame1, frame2, max_pixel_value=1.0):
 # Movies
 # -------------------------
 def _to_uint8(frames, vmin=None, vmax=None, cmap="afmhot"):
-    import matplotlib.cm as cm
+    from matplotlib import colormaps
 
     frames = np.asarray(frames)
     vmin = frames.min() if vmin is None else vmin
     vmax = frames.max() if vmax is None else vmax
     normed = np.clip((frames - vmin) / (vmax - vmin + 1e-12), 0, 1)
-    rgba = cm.get_cmap(cmap)(normed)
+    rgba = colormaps[cmap](normed)
     return (255 * rgba[..., :3]).astype(np.uint8)
 
 
