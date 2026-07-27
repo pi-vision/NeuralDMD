@@ -142,8 +142,12 @@ def main() -> None:
         w_sparse_weight=args.w_sparse_weight,
         b_sparse_weight=args.b_sparse_weight,
     )
-    eqx.tree_serialise_leaves(str(models_dir / f"trained_model_r{args.r}_f{args.frequencies}.eqx"), model)
-    print(f"[stage1] done; final chi2_vis ~ {history.get('chi2_vis', ['?'])[-1] if history else '?'}")
+    # NB: train_model already serialises the BEST-loss checkpoint to
+    # models_dir/trained_model_r{r}_f{f}.eqx. Do NOT write the final-epoch model
+    # here -- that overwrites the best one, and chi2 swings epoch to epoch, so a
+    # run that ends on a bad epoch would be scored on that bad state.
+    chi = history.get("chi2_vis", []) if history else []
+    print(f"[stage1] done; last-epoch chi2_vis ~ {chi[-1] if chi else '?'}; best chi2_vis ~ {min(chi) if chi else '?'}")
 
 
 if __name__ == "__main__":
