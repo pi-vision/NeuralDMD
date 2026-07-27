@@ -68,7 +68,7 @@ def main() -> None:
     ext = [-h, h, -h, h]
 
     def show(a, img, vmax):
-        a.imshow(np.clip(img, 0, None), cmap="afmhot", origin="lower", interpolation="bicubic", vmax=vmax, extent=ext)
+        a.imshow(np.clip(img, 0, None), cmap="afmhot", origin="upper", interpolation="bicubic", vmax=vmax, extent=ext)
         a.set_xticks([])
         a.set_yticks([])
 

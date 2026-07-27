@@ -98,7 +98,7 @@ def main() -> None:
     dv = float(max(np.abs(t_dyn).max(), np.abs(dynamic[idx]).max()))
     fig, ax = plt.subplots(2, 3, figsize=(10, 6.6))
     rows = [(truth[idx], t_dyn, t_stat, "truth"), (total[idx], dynamic[idx], static, "recon")]
-    ik = dict(origin="lower", interpolation="bicubic")  # no display pixelation
+    ik = dict(origin="upper", interpolation="bicubic")  # no display pixelation
     for row, (tot_i, dyn_i, sta_i, lbl) in enumerate(rows):
         ax[row, 0].imshow(tot_i, cmap="afmhot", vmin=0, vmax=fmax, **ik)
         ax[row, 0].set_ylabel(lbl, fontsize=12)
