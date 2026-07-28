@@ -143,28 +143,89 @@ def _to_uint8(frames, vmin=None, vmax=None, cmap="afmhot"):
     return (255 * rgba[..., :3]).astype(np.uint8)
 
 
-def make_gif(frames, path, fps=20, vmin=None, vmax=None, cmap="afmhot"):
-    """Save a (T, H, W) array as a colormapped GIF."""
-    frames_u8 = _to_uint8(frames, vmin, vmax, cmap)
+def _upscale(frames_u8, factor, resample="lanczos"):
+    """Enlarge (T, H, W, 3) uint8 frames by an integer factor.
+
+    Model grids are small (a 50x50 image is 50 pixels wide on screen), so
+    videos are enlarged for display. This is purely cosmetic: it does not add
+    information, and smooth resampling can make the reconstruction look like
+    it resolved more than the baselines support — use resample="nearest" to
+    keep the true pixel grid visible.
+    """
+    factor = int(factor or 1)
+    if factor <= 1:
+        return frames_u8
+
+    if resample == "nearest":
+        return frames_u8.repeat(factor, axis=1).repeat(factor, axis=2)
+
+    from PIL import Image  # ships with imageio
+
+    filt = {
+        "lanczos": Image.LANCZOS,
+        "bicubic": Image.BICUBIC,
+        "bilinear": Image.BILINEAR,
+    }[resample]
+    T, H, W = frames_u8.shape[:3]
+    out = np.empty((T, H * factor, W * factor, 3), dtype=np.uint8)
+    for i, frame in enumerate(frames_u8):
+        out[i] = np.asarray(
+            Image.fromarray(frame).resize((W * factor, H * factor), filt)
+        )
+    return out
+
+
+def make_gif(
+    frames,
+    path,
+    fps=20,
+    vmin=None,
+    vmax=None,
+    cmap="afmhot",
+    upscale=4,
+    resample="lanczos",
+):
+    """Save a (T, H, W) array as a colormapped GIF, enlarged upscale-fold."""
+    frames_u8 = _upscale(_to_uint8(frames, vmin, vmax, cmap), upscale, resample)
     iio.imwrite(path, frames_u8, duration=int(1000 / fps), loop=0)
-    print(f"Saved {path}")
+    print(f"Saved {path}  ({frames_u8.shape[2]}x{frames_u8.shape[1]}, {len(frames_u8)} frames)")
 
 
-def write_mp4(frames, path, fps=20, vmin=None, vmax=None, cmap="afmhot"):
+def write_mp4(
+    frames,
+    path,
+    fps=20,
+    vmin=None,
+    vmax=None,
+    cmap="afmhot",
+    upscale=4,
+    resample="lanczos",
+):
     """Save a (T, H, W) array as an mp4 (requires the imageio-ffmpeg plugin)."""
-    frames_u8 = _to_uint8(frames, vmin, vmax, cmap)
+    frames_u8 = _upscale(_to_uint8(frames, vmin, vmax, cmap), upscale, resample)
     iio.imwrite(path, frames_u8, fps=fps, codec="libx264")
-    print(f"Saved {path}")
+    print(f"Saved {path}  ({frames_u8.shape[2]}x{frames_u8.shape[1]}, {len(frames_u8)} frames)")
 
 
-def make_comparison_gif(truth, recon, path, fps=20, cmap="afmhot"):
+def make_comparison_gif(
+    truth, recon, path, fps=20, cmap="afmhot", upscale=4, resample="lanczos"
+):
     """Side-by-side (truth | reconstruction) GIF with a shared color scale."""
     truth, recon = np.asarray(truth), np.asarray(recon)
     vmin = min(truth.min(), recon.min())
     vmax = max(truth.max(), recon.max())
     pad = np.full((truth.shape[0], truth.shape[1], 2), vmin)
     combined = np.concatenate([truth, pad, recon], axis=2)
-    make_gif(combined, path, fps=fps, vmin=vmin, vmax=vmax, cmap=cmap)
+    make_gif(
+        combined,
+        path,
+        fps=fps,
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+        upscale=upscale,
+        resample=resample,
+    )
 
 
 # -------------------------
