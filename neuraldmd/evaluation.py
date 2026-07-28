@@ -19,6 +19,17 @@ def load_hdf5(dir_, file):
     return frames, times
 
 
+def observed_frame_count(obs_dir):
+    """Number of frames actually present in a dataset directory.
+
+    The observation scheduler can yield slightly fewer frames than the movie
+    has (a trailing scan can fall outside the observation window); the first
+    T_obs movie frames correspond to them one-to-one. DMDDataLoader trims to
+    this count during training, so evaluation should too.
+    """
+    return int(np.load(os.path.join(obs_dir, "num_vis_list.npy")).shape[0])
+
+
 def pixel_grid_coords(height, width, fov_x=np.pi, fov_y=np.pi):
     """Full-grid network coordinates, identical to DMDDataLoader.pixel_coords."""
     idx = np.arange(height * width, dtype=np.int64)
@@ -255,7 +266,19 @@ def evaluate_chi2(intensities, obs_dir, chunk=50):
 
     T = As.shape[0]
     I = np.asarray(intensities)
-    assert I.shape[1] == T, f"expected {T} frames, got {I.shape[1]}"
+    if I.shape[1] < T:
+        raise ValueError(
+            f"reconstruction has {I.shape[1]} frames but the dataset has {T}; "
+            "evaluate it on the dataset's time samples"
+        )
+    if I.shape[1] > T:
+        # extra frames are normal when the movie outruns the observation
+        # window (see observed_frame_count); the leading frames line up
+        print(
+            f"[evaluate_chi2] using the first {T} of {I.shape[1]} "
+            "reconstructed frames (dataset has fewer observed frames)"
+        )
+        I = I[:, :T]
 
     chi2_vis_num = chi2_amp_num = cp_num = 0.0
     for t0 in range(0, T, chunk):
